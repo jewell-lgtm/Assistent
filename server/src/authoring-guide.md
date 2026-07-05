@@ -14,7 +14,7 @@ A feature lives at `userspace/features/<name>/{shared.ts,server.ts,app.tsx}`.
 
 Both files may always import their own feature's `./shared.js` (the `api` definition) — that's not an exception, every feature needs it.
 
-`server.ts`: `effect`, `@effect/platform`, `node:*` builtins, `./shared.js`, and TYPE-ONLY imports from `@assistant/capabilities-server`.
+`server.ts`: `effect`, `@effect/platform`, `node:*` builtins, `./shared.js`, `@assistant/capabilities-server/persistence` (see Persistence below), and TYPE-ONLY imports from `@assistant/capabilities-server`.
 
 `app.tsx`: `effect`, `@effect/platform` (for `HttpApiClient`), `react`, `react-native`, `expo-location`, `expo-constants` (already-baked native modules only — OTA can't ship new native modules), `@assistant/capabilities-ui` and `@assistant/capabilities-ui/kit`, `./shared`, and TYPE-ONLY imports from `@assistant/capabilities-server`.
 
@@ -62,6 +62,30 @@ export default [
   { kind: "app-tab", name: "<name>", title: "<Name>", icon: "star", Component: MyScreen }
 ] satisfies ReadonlyArray<AppCapability>
 ```
+
+## Persistence — `@assistant/capabilities-server/persistence`
+
+For small structured state (settings, counters, last-seen values — not files), use `Persistence` instead of raw `node:fs`. It's a namespaced key-value store: your feature only ever sees its own keys, automatically scoped by your feature name — you cannot read or write another feature's data, and you don't need to think about the file layout.
+
+```ts
+import { Persistence } from "@assistant/capabilities-server/persistence"
+import { HttpApiBuilder } from "@effect/platform"
+import { Effect } from "effect"
+import { api } from "./shared.js"
+
+const live = HttpApiBuilder.group(api, "<group>", (handlers) =>
+  handlers.handle("<endpoint>", () =>
+    Effect.gen(function* () {
+      const kv = yield* Persistence
+      yield* kv.set("lastRunAt", new Date().toISOString())
+      const previous = yield* kv.get("lastRunAt")
+      return { previous }
+    })
+  )
+)
+```
+
+Values must be JSON-serializable. Prefer this over vault files for anything you'll read back and update — vault is for durable, human-readable output (reports, exports), not feature state.
 
 ## Vault convention
 
