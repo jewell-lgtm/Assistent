@@ -14,8 +14,7 @@ fi
 
 SHA=$(git rev-parse --short HEAD)
 docker build -t "assistant-server:$SHA" --build-arg "GIT_SHA=$SHA" -f server/Dockerfile .
-kubectl apply -f infra/k8s/assistant.yaml
-kubectl -n assistant set image deploy/assistant-server "server=assistant-server:$SHA"
+sed "s/IMAGE_TAG/$SHA/" infra/k8s/assistant.yaml | kubectl apply -f -
 if ! kubectl -n assistant rollout status deploy/assistant-server --timeout=180s; then
   echo "ROLLOUT FAILED — undoing" >&2
   kubectl -n assistant rollout undo deploy/assistant-server

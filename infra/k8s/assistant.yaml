@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: server
-          image: assistant-server:bootstrap
+          image: assistant-server:IMAGE_TAG # templated by redeploy.sh
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
