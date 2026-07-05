@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from "react-native"
 import * as Updates from "expo-updates"
 
 // E1 marker: bump this string, publish OTA, expect it on the phone without reinstall.
-const OTA_MARKER = "ota-v1"
+const OTA_MARKER = "ota-v2"
 
 export default function App() {
   const [status, setStatus] = useState("checking for update…")
