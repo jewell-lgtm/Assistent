@@ -121,6 +121,9 @@ importers:
       react:
         specifier: '*'
         version: 19.2.3
+      react-native:
+        specifier: '*'
+        version: 0.86.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.17)(react@19.2.3)
     devDependencies:
       '@types/react':
         specifier: '*'

@@ -1,7 +1,7 @@
 import { PiClient, PiError, type PiRunOptions } from "@assistant/capabilities-server/pi"
 import { Config, Effect, Layer } from "effect"
 import { execFile } from "node:child_process"
-import { constants as fsConstants } from "node:fs"
+import { constants as fsConstants, readFileSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { promisify } from "node:util"
@@ -11,11 +11,18 @@ import {
   type CreateAgentSessionOptions,
   createEditToolDefinition,
   createWriteToolDefinition,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRegistry,
   SessionManager
 } from "@earendil-works/pi-coding-agent"
 
 const execFileP = promisify(execFile)
+
+// Injected into every coding-mode run's system prompt via the resource
+// loader's appendSystemPrompt (real channel, not string-concat into the user
+// prompt). Static file baked into the image — read once at module init.
+const AUTHORING_GUIDE = readFileSync(new URL("./authoring-guide.md", import.meta.url), "utf8")
 
 const UserspaceDir = Config.string("USERSPACE_DIR").pipe(Config.withDefault("/repo/userspace"))
 const OllamaBaseUrl = Config.string("OLLAMA_BASE_URL").pipe(
@@ -62,6 +69,24 @@ const guardedTools = (root: string) =>
     })
   ] as NonNullable<CreateAgentSessionOptions["customTools"]>
 
+// Real system-prompt channel (resourceLoader.appendSystemPrompt), not string-
+// concat into the user prompt — same cwd/agentDir createAgentSession would
+// default to, plus the guide appended to every coding-mode system prompt.
+//
+// root is also where the guarded write tool writes, so it must never be
+// treated as a trusted project: force untrusted so the loader neither
+// auto-loads/executes .pi/extensions/* nor lets a planted .pi/SYSTEM.md
+// replace the base system prompt ahead of AUTHORING_GUIDE.
+const codingResourceLoader = async (root: string) => {
+  const loader = new DefaultResourceLoader({
+    cwd: root,
+    agentDir: getAgentDir(),
+    appendSystemPrompt: [AUTHORING_GUIDE]
+  })
+  await loader.reload({ resolveProjectTrust: async () => false })
+  return loader
+}
+
 const lastAssistantText = (messages: ReadonlyArray<any>): string => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
@@ -96,7 +121,9 @@ const runPi = async (
     cwd: env.root,
     model,
     tools: coding ? ["read", "edit", "write", "grep", "find", "ls"] : [],
-    ...(coding ? { customTools: guardedTools(env.root) } : {}),
+    ...(coding
+      ? { customTools: guardedTools(env.root), resourceLoader: await codingResourceLoader(env.root) }
+      : {}),
     sessionManager: SessionManager.inMemory(env.root)
   })
   const killer = setTimeout(() => void session.abort(), RUN_TIMEOUT_MS)

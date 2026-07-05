@@ -3,8 +3,10 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
+      "@assistant/capabilities-ui": ["../../packages/capabilities-ui/src/index.ts"],
       "@assistant/capabilities-ui/app": ["../../packages/capabilities-ui/src/app.ts"],
       "@assistant/capabilities-ui/pi": ["../../packages/capabilities-ui/src/pi.ts"],
+      "@assistant/capabilities-ui/kit": ["../../packages/capabilities-ui/src/kit.tsx"],
       "@assistant/capabilities-server/pi": ["../../packages/capabilities-server/src/pi.ts"]
     }
   },
