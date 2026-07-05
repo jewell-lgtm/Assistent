@@ -398,7 +398,9 @@ export const CodeScreen = () => {
   // user re-prompts Pi to fix; nothing broken ever gets published or reloaded.
   const runPipeline = async () => {
     setPipeline({ step: "deploying" })
-    const deploy = await postOps("/api/system/redeploy", 5)
+    // Fast path: userspace-only self-mods just need a pod restart (userspace is
+    // mounted), not a docker rebuild — /reload is seconds, /redeploy is minutes.
+    const deploy = await postOps("/api/system/reload", 5)
     if (!mountedRef.current) return
     if (!deploy.ok) {
       setPipeline({ step: "failed", at: "deploy", output: deploy.text })
@@ -592,9 +594,9 @@ export const CodeScreen = () => {
             <Spacer />
             <Caption>
               {pipeline.step === "deploying"
-                ? "① deploying server (building — this takes a few minutes)…"
+                ? "① restarting server with your new routes…"
                 : pipeline.step === "publishing"
-                  ? "② publishing app bundle…"
+                  ? "② publishing app bundle (~30s)…"
                   : "③ reloading into your new feature…"}
             </Caption>
           </>

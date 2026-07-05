@@ -173,6 +173,7 @@ const systemReset = Effect.gen(function* () {
 export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
   router.pipe(
     HttpRouter.post("/api/system/redeploy", proxy("/redeploy")),
+    HttpRouter.post("/api/system/reload", proxy("/reload")),
     HttpRouter.post("/api/system/publish-ota", proxy("/publish-ota")),
     HttpRouter.post("/api/system/code", codeStart),
     HttpRouter.get("/api/system/code/:runId/stream", codeStream),

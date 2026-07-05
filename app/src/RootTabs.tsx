@@ -4,8 +4,9 @@ import { Ionicons } from "@expo/vector-icons"
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
 import { Effect } from "effect"
 import * as Updates from "expo-updates"
-import { useState, type ComponentType } from "react"
+import { useState, type ComponentType, type PropsWithChildren } from "react"
 import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native"
+import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { CodeScreen } from "./CodeScreen"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { apiPost, PiProxyLive } from "./PiProxy"
@@ -165,6 +166,13 @@ const coreTabs: ReadonlyArray<CoreTab> = [
   { name: "apps", title: "Apps", icon: "apps", Component: AppsScreen }
 ]
 
+// Tabs have no nav header (headerShown:false), so nothing provides the top
+// safe-area inset — without this, content renders under the status bar/notch.
+const SafeTop = ({ children }: PropsWithChildren) => {
+  const insets = useSafeAreaInsets()
+  return <View style={{ flex: 1, paddingTop: insets.top }}>{children}</View>
+}
+
 const Tabs = createBottomTabNavigator()
 
 export const RootTabs = () => (
@@ -179,9 +187,11 @@ export const RootTabs = () => (
         }}
       >
         {() => (
-          <ErrorBoundary name={name}>
-            <Component />
-          </ErrorBoundary>
+          <SafeTop>
+            <ErrorBoundary name={name}>
+              <Component />
+            </ErrorBoundary>
+          </SafeTop>
         )}
       </Tabs.Screen>
     ))}
