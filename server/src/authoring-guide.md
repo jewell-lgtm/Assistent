@@ -22,7 +22,7 @@ Both files may always import their own feature's `./shared.js` (the `api` defini
 
 `Screen, Title, Body, Caption, Button, TextField, Form, List, Spacer`. Compose these; do not hand-roll `StyleSheet`/`TextInput`/etc.
 
-Worked example — `Form` wired to a typed `HttpApiClient` call (same base-url/token pattern as `userspace/features/run-tracker/app.tsx`; duplicate it, core config isn't importable from userspace):
+Worked example — `Form` wired to a typed `HttpApiClient` call (core config isn't importable from userspace, so every feature duplicates this base-url/token setup):
 
 ```tsx
 import type { AppCapability } from "@assistant/capabilities-ui/app"
@@ -89,13 +89,11 @@ Values must be JSON-serializable. Prefer this over vault files for anything you'
 
 ## Vault convention
 
-Durable output goes under `<USERSPACE_DIR>/vault/<feature-name>/`. See `vaultDir()` in `userspace/features/run-tracker/server.ts`:
+Durable output goes under `<USERSPACE_DIR>/vault/<feature-name>/` — use your own feature name as the subdirectory:
 
 ```ts
-const vaultDir = () => path.join(process.env.USERSPACE_DIR ?? "/repo/userspace", "vault", "runs")
+const vaultDir = () => path.join(process.env.USERSPACE_DIR ?? "/repo/userspace", "vault", "<your-feature-name>")
 ```
-
-Use your own feature name as the subdirectory, not `"runs"`.
 
 ## The gate
 
