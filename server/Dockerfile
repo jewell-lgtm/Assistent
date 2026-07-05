@@ -1,5 +1,5 @@
 FROM node:22-alpine
-RUN corepack enable pnpm
+RUN npm install -g pnpm@10.20.0
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY server/package.json server/
