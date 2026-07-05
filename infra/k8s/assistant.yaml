@@ -35,12 +35,21 @@ spec:
                 secretKeyRef:
                   name: assistant-secrets
                   key: API_TOKEN
+            - name: OPSD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: assistant-secrets
+                  key: OPSD_TOKEN
             - name: UPDATES_DIR
               value: /data/updates
+            - name: REPO_DIR
+              value: /repo
           volumeMounts:
             - name: updates
               mountPath: /data/updates
               readOnly: true
+            - name: repo
+              mountPath: /repo
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 2
@@ -57,6 +66,10 @@ spec:
           hostPath:
             path: /Users/mattisfrommars/assistant-data/updates
             type: DirectoryOrCreate
+        - name: repo
+          hostPath:
+            path: /Users/mattisfrommars/assistant
+            type: Directory
 ---
 apiVersion: v1
 kind: Service

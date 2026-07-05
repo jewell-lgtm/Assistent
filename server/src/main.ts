@@ -2,7 +2,9 @@ import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerRe
 import { NodeContext, NodeHttpServer, NodeRuntime } from "@effect/platform-node"
 import { Config, Effect, Layer, Redacted } from "effect"
 import { createServer } from "node:http"
+import { FetchHttpClient } from "@effect/platform"
 import { otaRoutes } from "./ota.js"
+import { systemRoutes } from "./system.js"
 
 const GitSha = Config.string("GIT_SHA").pipe(Config.withDefault("dev"))
 const Port = Config.integer("PORT").pipe(Config.withDefault(8080))
@@ -35,7 +37,8 @@ const router = HttpRouter.empty.pipe(
     "/api/whoami",
     HttpServerResponse.json({ app: "local-assistent", experiment: true })
   ),
-  otaRoutes
+  otaRoutes,
+  systemRoutes
 )
 
 const app = router.pipe(bearerAuth, HttpServer.serve(HttpMiddleware.logger))
@@ -44,4 +47,8 @@ const ServerLive = Layer.unwrapEffect(
   Effect.map(Port, (port) => NodeHttpServer.layer(() => createServer(), { port, host: "0.0.0.0" }))
 )
 
-NodeRuntime.runMain(Layer.launch(Layer.provide(app, Layer.merge(ServerLive, NodeContext.layer))))
+NodeRuntime.runMain(
+  Layer.launch(
+    Layer.provide(app, Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer))
+  )
+)

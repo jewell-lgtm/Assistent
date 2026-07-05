@@ -15,7 +15,8 @@ const TIMEOUT_MS = 15 * 60 * 1000
 
 const SCRIPTS = {
   "/redeploy": "scripts/redeploy.sh",
-  "/publish-ota": "scripts/publish-ota-mini.sh"
+  "/publish-ota": "scripts/publish-ota-mini.sh",
+  "/code": "scripts/agent-code.sh"
 }
 
 let busy = false

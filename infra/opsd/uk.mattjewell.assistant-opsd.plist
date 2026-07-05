@@ -6,9 +6,16 @@
   <string>uk.mattjewell.assistant-opsd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/mattisfrommars/.local/share/mise/shims/node</string>
+    <string>/Users/mattisfrommars/.local/share/mise/installs/node/22.22.1/bin/node</string>
     <string>/Users/mattisfrommars/opsd/opsd.mjs</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/mattisfrommars/.local/share/mise/shims:/opt/homebrew/bin:/Applications/OrbStack.app/Contents/MacOS/xbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/mattisfrommars</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
