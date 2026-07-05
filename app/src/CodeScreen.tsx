@@ -362,19 +362,35 @@ export const CodeScreen = () => {
 
   // POST an opsd-proxied endpoint (real docker build / bundle export, minutes-
   // long). Returns ok + the full response text (gate/tsc errors must survive
-  // to the phone verbatim).
-  const postOps = async (path: string): Promise<{ ok: boolean; text: string }> => {
-    try {
-      const res = await fetch(`${BASE_URL}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
-        body: "{}"
-      })
-      const text = await res.text()
-      return { ok: res.ok, text: text || `(empty response, HTTP ${res.status})` }
-    } catch (e) {
-      return { ok: false, text: `request failed: ${e instanceof Error ? e.message : String(e)}` }
+  // to the phone verbatim). Retries a transient gateway blip: a deploy restarts
+  // the pod, so a follow-up publish can momentarily hit Caddy with no upstream
+  // (502/503/504) — that's infra, not a build failure, so retry rather than
+  // surface it. A real gate failure comes back 200-from-opsd with error text
+  // (opsd always answers) or a 4xx, neither of which we retry.
+  const TRANSIENT = new Set([502, 503, 504])
+  const postOps = async (path: string, attempts = 1): Promise<{ ok: boolean; text: string }> => {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await fetch(`${BASE_URL}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
+          body: "{}"
+        })
+        const text = await res.text()
+        if (TRANSIENT.has(res.status) && i < attempts - 1) {
+          await new Promise((r) => setTimeout(r, 5000))
+          continue
+        }
+        return { ok: res.ok, text: text || `(empty response, HTTP ${res.status})` }
+      } catch (e) {
+        if (i < attempts - 1) {
+          await new Promise((r) => setTimeout(r, 5000))
+          continue
+        }
+        return { ok: false, text: `request failed: ${e instanceof Error ? e.message : String(e)}` }
+      }
     }
+    return { ok: false, text: "gave up after retries" }
   }
 
   // Auto ship-it pipeline: deploy → publish → reload, no buttons. A failing
@@ -382,14 +398,14 @@ export const CodeScreen = () => {
   // user re-prompts Pi to fix; nothing broken ever gets published or reloaded.
   const runPipeline = async () => {
     setPipeline({ step: "deploying" })
-    const deploy = await postOps("/api/system/redeploy")
+    const deploy = await postOps("/api/system/redeploy", 5)
     if (!mountedRef.current) return
     if (!deploy.ok) {
       setPipeline({ step: "failed", at: "deploy", output: deploy.text })
       return
     }
     setPipeline({ step: "publishing" })
-    const publish = await postOps("/api/system/publish-ota")
+    const publish = await postOps("/api/system/publish-ota", 5) // ride out the post-deploy pod rollover
     if (!mountedRef.current) return
     if (!publish.ok) {
       setPipeline({ step: "failed", at: "publish", output: publish.text })
@@ -467,7 +483,7 @@ export const CodeScreen = () => {
     }
 
     setResetStatus("rebuilding a clean app bundle…")
-    const publish = await postOps("/api/system/publish-ota")
+    const publish = await postOps("/api/system/publish-ota", 5)
     if (!mountedRef.current) return
     if (!publish.ok) {
       setResetStatus(`reset done on server, but bundle publish failed: ${publish.text.slice(0, 200)}`)
