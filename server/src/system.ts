@@ -9,7 +9,7 @@ import {
 import { PiClient, type PiRunOptions } from "@assistant/capabilities-server/pi"
 import { Config, Effect, Redacted } from "effect"
 import * as path from "node:path"
-import { codingEnv, commitUserspace } from "./code.js"
+import { codingEnv, commitUserspace, resetAllState } from "./code.js"
 import { codingRunEventStream, getCodingRunStatus, startCodingRun } from "./coding-runs.js"
 
 const OpsdUrl = Config.string("OPSD_URL").pipe(Config.withDefault("http://host.orb.internal:9876"))
@@ -143,6 +143,33 @@ const codeStatus = Effect.gen(function* () {
   return yield* HttpServerResponse.json(status)
 })
 
+// Demo/PoC reset: wipe all assistant-built state, then exit — kubernetes
+// restarts the container and boot rebuilds the skeleton (bootstrap + regen).
+// The delayed exit lets the 200 reply flush first. Deliberately no engine-busy
+// guard: reset is absolute, and the dying process takes any live run with it.
+const resetHandler = Effect.gen(function* () {
+  yield* resetAllState
+  setTimeout(() => process.exit(0), 750)
+  return yield* HttpServerResponse.json({ ok: true, resetting: true })
+}).pipe(
+  Effect.catchTag("PiError", (e) => HttpServerResponse.json({ error: e.message }, { status: 500 }))
+)
+
+// Demo/PoC hard reset: wipe all assistant-built state, respond, then exit so
+// the container restart rebuilds the skeleton from appspace (bootstrap). The
+// process.exit is deferred past the response flush. maxUnavailable:0 means the
+// replacement pod is up before this one dies, so the client's follow-up
+// reconnect lands on a freshly-bootstrapped server.
+const systemReset = Effect.gen(function* () {
+  yield* resetAllState
+  yield* Effect.sync(() => {
+    setTimeout(() => process.exit(0), 500)
+  })
+  return yield* HttpServerResponse.json({ ok: true, message: "state wiped; server restarting" })
+}).pipe(
+  Effect.catchTag("PiError", (e) => HttpServerResponse.json({ error: e.message }, { status: 500 }))
+)
+
 export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
   router.pipe(
     HttpRouter.post("/api/system/redeploy", proxy("/redeploy")),
@@ -157,5 +184,6 @@ export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
     // "busy" flag, so letting a client request tools:"coding" here would let
     // a coding run bypass single-flight and race a concurrent one.
     HttpRouter.post("/api/pi/run", piRun({ tools: "none" })),
+    HttpRouter.post("/api/system/reset", systemReset),
     HttpRouter.get("/api/motd", motd)
   )

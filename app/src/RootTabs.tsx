@@ -58,17 +58,15 @@ const ChatScreen = () => (
   <PromptScreen note="chat lands in E4 — this exercises PiProxy → /api/pi/run" submit={runPi} />
 )
 
-type Tab = {
+type Feature = {
   readonly name: string
   readonly title: string
-  readonly icon: string
   readonly Component: ComponentType
 }
 
-const brokenTab = (name: string, error: unknown): Tab => ({
+const brokenFeature = (name: string, error: unknown): Feature => ({
   name,
   title: name,
-  icon: "warning",
   Component: () => (
     <View style={[styles.screen, { alignItems: "center", justifyContent: "center" }]}>
       <Text style={{ fontWeight: "700" }}>module “{name}” failed to load</Text>
@@ -77,39 +75,76 @@ const brokenTab = (name: string, error: unknown): Tab => ({
   )
 })
 
-// Userspace tabs: a throwing load() yields a broken-tab screen, never a crash.
-const loadedUserTabs: ReadonlyArray<Tab> = userspaceApp.flatMap((entry) => {
+// Userspace features: a throwing load() yields a broken screen, never a crash.
+const userFeatures: ReadonlyArray<Feature> = userspaceApp.flatMap((entry) => {
   try {
-    return entry.load().filter((c): c is AppTabCapability => c.kind === "app-tab")
+    return entry
+      .load()
+      .filter((c): c is AppTabCapability => c.kind === "app-tab")
+      .map((c) => ({ name: c.name, title: c.title, Component: c.Component }))
   } catch (e) {
-    return [brokenTab(entry.name, e)]
+    return [brokenFeature(entry.name, e)]
   }
 })
 
-const coreTabs: ReadonlyArray<Tab> = [
+// Master→detail: every assistant-created feature lives under ONE "Apps" tab
+// (a list you drill into), not a bottom tab each — so N generated apps don't
+// overflow the tab bar. Per-feature ErrorBoundary still isolates a bad one.
+const AppsScreen = () => {
+  const [selected, setSelected] = useState<number | null>(null)
+
+  if (selected !== null && userFeatures[selected] !== undefined) {
+    const feature = userFeatures[selected]
+    return (
+      <View style={styles.screen}>
+        <TouchableOpacity style={styles.backRow} onPress={() => setSelected(null)}>
+          <Ionicons name="chevron-back" size={20} color="#0a7" />
+          <Text style={styles.backText}>Apps</Text>
+        </TouchableOpacity>
+        <View style={{ flex: 1 }}>
+          <ErrorBoundary name={feature.name}>
+            <feature.Component />
+          </ErrorBoundary>
+        </View>
+      </View>
+    )
+  }
+
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={{ paddingVertical: 8 }}>
+      {userFeatures.length === 0 ? (
+        <View style={{ alignItems: "center", paddingTop: 48, gap: 8 }}>
+          <Ionicons name="sparkles-outline" size={40} color="#bbb" />
+          <Text style={{ fontWeight: "700", fontSize: 16 }}>No apps yet</Text>
+          <Text style={{ color: "#666", textAlign: "center", paddingHorizontal: 24 }}>
+            Go to the Code tab and describe an app you want. It’ll appear here once it’s built.
+          </Text>
+        </View>
+      ) : (
+        userFeatures.map((feature, i) => (
+          <TouchableOpacity key={feature.name} style={styles.listRow} onPress={() => setSelected(i)}>
+            <Ionicons name="cube-outline" size={22} color="#0a7" />
+            <Text style={styles.listTitle}>{feature.title}</Text>
+            <Ionicons name="chevron-forward" size={18} color="#bbb" />
+          </TouchableOpacity>
+        ))
+      )}
+    </ScrollView>
+  )
+}
+
+type CoreTab = { readonly name: string; readonly title: string; readonly icon: string; readonly Component: ComponentType }
+const coreTabs: ReadonlyArray<CoreTab> = [
   { name: "chat", title: "Chat", icon: "chatbubble-ellipses", Component: ChatScreen },
-  { name: "code", title: "Code", icon: "code-slash", Component: CodeScreen }
+  { name: "code", title: "Code", icon: "code-slash", Component: CodeScreen },
+  { name: "apps", title: "Apps", icon: "apps", Component: AppsScreen }
 ]
-
-// React Navigation crashes the whole navigator on a duplicate screen name —
-// a colliding userspace tab (name clash with core or another module) must
-// not be able to take down chat/code. Dedupe by first-registered-wins; losers
-// become broken tabs under a synthesized unique name (else N collisions on
-// the same name would just collide again as broken tabs).
-const seenTabNames = new Set(coreTabs.map((t) => t.name))
-const userTabs: ReadonlyArray<Tab> = loadedUserTabs.map((tab, i) => {
-  if (seenTabNames.has(tab.name)) {
-    return brokenTab(`${tab.name}-dup-${i}`, new Error(`duplicate tab name "${tab.name}" — refused to register`))
-  }
-  seenTabNames.add(tab.name)
-  return tab
-})
 
 const Tabs = createBottomTabNavigator()
 
 export const RootTabs = () => (
   <Tabs.Navigator screenOptions={{ headerShown: false }}>
-    {[...coreTabs, ...userTabs].map(({ name, title, icon, Component }) => (
+    {coreTabs.map(({ name, title, icon, Component }) => (
       <Tabs.Screen
         key={name}
         name={name}
@@ -135,5 +170,17 @@ const styles = StyleSheet.create({
   button: { backgroundColor: "#0a7", borderRadius: 6, padding: 10, alignItems: "center" },
   buttonText: { color: "#fff", fontWeight: "700" },
   output: { flex: 1, borderWidth: 1, borderColor: "#eee", borderRadius: 6, padding: 8 },
-  outputText: { fontSize: 12, fontFamily: "monospace" }
+  outputText: { fontSize: 12, fontFamily: "monospace" },
+  listRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#eee"
+  },
+  listTitle: { flex: 1, fontSize: 16, fontWeight: "600" },
+  backRow: { flexDirection: "row", alignItems: "center", paddingVertical: 6 },
+  backText: { color: "#0a7", fontSize: 16, fontWeight: "600" }
 })

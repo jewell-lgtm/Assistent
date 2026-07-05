@@ -1,8 +1,8 @@
 import { Body, Button, Caption, Screen, Spacer, TextField, Title } from "@assistant/capabilities-ui/kit"
 import { Effect } from "effect"
 import * as Updates from "expo-updates"
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react"
-import { AppState, ScrollView, StyleSheet, Text, View } from "react-native"
+import { useEffect, useRef, useState } from "react"
+import { Alert, AppState, ScrollView, StyleSheet, Text, View } from "react-native"
 import { API_TOKEN, apiRequest, BASE_URL } from "./PiProxy"
 import { connectSse, type SseFrame } from "./sse"
 
@@ -97,23 +97,21 @@ const STALL_CHECK_MS = 5000
 // Minimum gap between SSE reconnect attempts — beyond it, degrade to polling.
 const RECONNECT_MIN_GAP_MS = 5000
 
-interface OpsState {
-  readonly busy: boolean
-  readonly output: string | null
-  readonly ok: boolean
-}
-const OPS_IDLE: OpsState = { busy: false, output: null, ok: false }
+// After a coding run finishes, the whole ship-it pipeline runs automatically:
+// deploy the new server routes (through the type gate), publish the app bundle,
+// then reload into it — no buttons, just churn until the feature is live.
+type Pipeline =
+  | { readonly step: "idle" }
+  | { readonly step: "deploying" }
+  | { readonly step: "publishing" }
+  | { readonly step: "reloading" }
+  | { readonly step: "failed"; readonly at: string; readonly output: string }
 
 export const CodeScreen = () => {
   const [prompt, setPrompt] = useState("")
   const [phase, setPhase] = useState<Phase>({ p: "idle" })
   const [transcript, setTranscript] = useState<ReadonlyArray<TranscriptLine>>([])
-  const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({
-    busy: false,
-    status: null
-  })
-  const [deploy, setDeploy] = useState<OpsState>(OPS_IDLE)
-  const [publish, setPublish] = useState<OpsState>(OPS_IDLE)
+  const [pipeline, setPipeline] = useState<Pipeline>({ step: "idle" })
 
   const mountedRef = useRef(true)
   const runIdRef = useRef<string | null>(null)
@@ -168,6 +166,7 @@ export const CodeScreen = () => {
       terminalRef.current = true
       stopPolling()
       setPhase({ p: "done", runId, result: status.result })
+      void runPipeline()
     } else if (status.kind === "error") {
       terminalRef.current = true
       stopPolling()
@@ -250,6 +249,7 @@ export const CodeScreen = () => {
                 runId,
                 result: { text: result.text ?? "", model: result.model ?? "?", commit: result.commit ?? undefined }
               })
+              void runPipeline()
               break
             }
             case "error": {
@@ -350,13 +350,16 @@ export const CodeScreen = () => {
     []
   )
 
-  const busy = phase.p === "starting" || phase.p === "streaming" || phase.p === "disconnected"
+  const busy =
+    phase.p === "starting" ||
+    phase.p === "streaming" ||
+    phase.p === "disconnected" ||
+    (pipeline.step !== "idle" && pipeline.step !== "failed")
 
-  // Slow, synchronous, opsd-proxied endpoints (real docker build, minutes-long) —
-  // full response text rendered verbatim, never summarized (gate/tsc errors
-  // must be readable on the phone). Not SSE; out of scope to change per spec.
-  const runOps = async (path: string, setState: Dispatch<SetStateAction<OpsState>>): Promise<boolean> => {
-    setState({ busy: true, output: null, ok: false })
+  // POST an opsd-proxied endpoint (real docker build / bundle export, minutes-
+  // long). Returns ok + the full response text (gate/tsc errors must survive
+  // to the phone verbatim).
+  const postOps = async (path: string): Promise<{ ok: boolean; text: string }> => {
     try {
       const res = await fetch(`${BASE_URL}${path}`, {
         method: "POST",
@@ -364,20 +367,51 @@ export const CodeScreen = () => {
         body: "{}"
       })
       const text = await res.text()
-      if (!mountedRef.current) return false
-      setState({ busy: false, output: text || `(empty response, HTTP ${res.status})`, ok: res.ok })
-      return res.ok
+      return { ok: res.ok, text: text || `(empty response, HTTP ${res.status})` }
     } catch (e) {
-      if (!mountedRef.current) return false
-      setState({ busy: false, output: `request failed: ${e instanceof Error ? e.message : String(e)}`, ok: false })
-      return false
+      return { ok: false, text: `request failed: ${e instanceof Error ? e.message : String(e)}` }
     }
   }
 
-  const onDeploy = () => void runOps("/api/system/redeploy", setDeploy)
-  const onPublish = () => void runOps("/api/system/publish-ota", setPublish)
+  // Auto ship-it pipeline: deploy → publish → reload, no buttons. A failing
+  // deploy (type gate) halts before publish and surfaces the errors so the
+  // user re-prompts Pi to fix; nothing broken ever gets published or reloaded.
+  const runPipeline = async () => {
+    setPipeline({ step: "deploying" })
+    const deploy = await postOps("/api/system/redeploy")
+    if (!mountedRef.current) return
+    if (!deploy.ok) {
+      setPipeline({ step: "failed", at: "deploy", output: deploy.text })
+      return
+    }
+    setPipeline({ step: "publishing" })
+    const publish = await postOps("/api/system/publish-ota")
+    if (!mountedRef.current) return
+    if (!publish.ok) {
+      setPipeline({ step: "failed", at: "publish", output: publish.text })
+      return
+    }
+    setPipeline({ step: "reloading" })
+    if (__DEV__) {
+      setPipeline({ step: "failed", at: "reload", output: "dev mode — OTA reload disabled" })
+      return
+    }
+    try {
+      const check = await Updates.checkForUpdateAsync()
+      if (check.isAvailable) {
+        await Updates.fetchUpdateAsync()
+        await Updates.reloadAsync() // app reloads into the new feature; nothing after runs
+      } else if (mountedRef.current) {
+        setPipeline({ step: "failed", at: "reload", output: "published, but no new update offered yet — try refresh" })
+      }
+    } catch (e) {
+      if (mountedRef.current) setPipeline({ step: "failed", at: "reload", output: `reload failed: ${String(e)}` })
+    }
+  }
 
-  const onReload = async () => {
+  // Manual refresh — for "am I on the latest bundle?" independent of a run.
+  const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({ busy: false, status: null })
+  const onRefresh = async () => {
     if (__DEV__) {
       setOta({ busy: false, status: "dev mode — updates disabled" })
       return
@@ -389,12 +423,40 @@ export const CodeScreen = () => {
         if (mountedRef.current) setOta({ busy: false, status: "no update available yet" })
         return
       }
-      if (mountedRef.current) setOta({ busy: true, status: "downloading update…" })
       await Updates.fetchUpdateAsync()
-      await Updates.reloadAsync() // app reloads; nothing after this runs
+      await Updates.reloadAsync()
     } catch (e) {
       if (mountedRef.current) setOta({ busy: false, status: `update check failed: ${String(e)}` })
     }
+  }
+
+  // Demo hard reset: wipe every assistant-built feature + memory on the server
+  // AND reload the app into the pristine embedded bundle. Confirmed natively.
+  const onReset = () => {
+    Alert.alert(
+      "Reset everything?",
+      "Deletes every feature the assistant has built (server userspace, vault, history) and reloads the app to a clean slate. Cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setPipeline({ step: "idle" })
+              setPhase({ p: "idle" })
+              setTranscript([])
+              await postOps("/api/system/reset") // server wipes + restarts; response may never arrive
+              try {
+                if (!__DEV__) await Updates.reloadAsync()
+              } catch {
+                /* reload best-effort; server is already resetting */
+              }
+            })()
+          }
+        }
+      ]
+    )
   }
 
   return (
@@ -458,73 +520,51 @@ export const CodeScreen = () => {
           <>
             <Spacer />
             <Caption>
-              done · {phase.result.model}
+              wrote code · {phase.result.model}
               {phase.result.commit !== undefined ? ` · ${phase.result.commit}` : ""}
             </Caption>
             <Body>{phase.result.text}</Body>
           </>
         )}
 
-        <Spacer size={20} />
-        <View style={styles.row}>
-          <View style={styles.rowItem}>
-            <Button
-              title="Deploy"
-              variant="secondary"
-              onPress={onDeploy}
-              loading={deploy.busy}
-              disabled={deploy.busy || publish.busy}
-            />
-          </View>
-          <View style={styles.rowItem}>
-            <Button
-              title="Publish OTA"
-              variant="secondary"
-              onPress={() => void onPublish()}
-              loading={publish.busy}
-              disabled={deploy.busy || publish.busy}
-            />
-          </View>
-        </View>
+        {/* Auto ship-it pipeline — churns after the run with no buttons. */}
+        {(pipeline.step === "deploying" || pipeline.step === "publishing" || pipeline.step === "reloading") && (
+          <>
+            <Spacer />
+            <Caption>
+              {pipeline.step === "deploying"
+                ? "① deploying server (building — this takes a few minutes)…"
+                : pipeline.step === "publishing"
+                  ? "② publishing app bundle…"
+                  : "③ reloading into your new feature…"}
+            </Caption>
+          </>
+        )}
+        {pipeline.step === "failed" && (
+          <>
+            <Spacer />
+            <Caption>pipeline halted at {pipeline.at} — nothing broken was shipped. Fix by re-prompting above.</Caption>
+            <ScrollView style={styles.logBox} nestedScrollEnabled>
+              <Text selectable style={styles.logText}>
+                {pipeline.output}
+              </Text>
+            </ScrollView>
+          </>
+        )}
 
-        {deploy.output !== null && (
-          <>
-            <Spacer size={8} />
-            <Caption>deploy output{deploy.ok ? "" : " (failed)"}</Caption>
-            <ScrollView style={styles.logBox} nestedScrollEnabled>
-              <Text selectable style={styles.logText}>
-                {deploy.output}
-              </Text>
-            </ScrollView>
-          </>
-        )}
-        {publish.output !== null && (
-          <>
-            <Spacer size={8} />
-            <Caption>publish output{publish.ok ? "" : " (failed)"}</Caption>
-            <ScrollView style={styles.logBox} nestedScrollEnabled>
-              <Text selectable style={styles.logText}>
-                {publish.output}
-              </Text>
-            </ScrollView>
-          </>
-        )}
-        <Spacer size={20} />
-        {/* Always available — not gated behind a publish in this session: the
-            update may have been published from anywhere (another device, the
-            server itself). Shows the RUNNING bundle's identity so "am I on the
-            latest?" is answerable at a glance. */}
+        <Spacer size={28} />
+        {/* Shows the RUNNING bundle's identity so "am I on the latest?" is
+            answerable at a glance; manual refresh independent of a run. */}
         <Caption>
           bundle: {__DEV__ ? "dev" : `${Updates.updateId?.slice(0, 8) ?? "embedded"} · ${Updates.createdAt?.toISOString?.() ?? "APK build"}`}
         </Caption>
         <Spacer size={4} />
-        <Button
-          title={ota.busy ? "checking…" : "Check for update & reload"}
-          variant="secondary"
-          onPress={() => void onReload()}
-          loading={ota.busy}
-        />
+        <Button title={ota.busy ? "checking…" : "Refresh (check for update)"} variant="secondary" onPress={() => void onRefresh()} loading={ota.busy} disabled={busy} />
         {ota.status !== null && <Caption>{ota.status}</Caption>}
+
+        <Spacer size={24} />
+        <Button title="Reset everything" variant="danger" onPress={onReset} disabled={busy} />
+        <Caption>wipes all assistant-built state (server + app) — demo reset</Caption>
         <Spacer size={40} />
       </ScrollView>
     </Screen>

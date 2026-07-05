@@ -299,6 +299,26 @@ export const PiClientLive = Layer.effect(
 )
 
 /**
+ * Demo/PoC total reset: erase EVERYTHING the assistant has built or remembered
+ * — the full userspace contents (features, config, vault, data, its git
+ * history) and the engine's session archive. The caller then exits the
+ * process; the container restart re-runs bootstrap-userspace + registry
+ * regen, so the system rebuilds its skeleton from appspace alone.
+ */
+export const resetAllState = Effect.gen(function* () {
+  const root = yield* UserspaceDir
+  yield* Effect.tryPromise({
+    try: async () => {
+      for (const entry of await fs.readdir(root)) {
+        await fs.rm(path.join(root, entry), { recursive: true, force: true })
+      }
+      await fs.rm(piSessionDir(), { recursive: true, force: true }).catch(() => {})
+    },
+    catch: (e) => new PiError({ message: `reset failed: ${String(e)}` })
+  })
+})
+
+/**
  * A failed run must not leave partial edits in the hot-mounted working tree:
  * they'd be live-served immediately AND silently swept into the next run's
  * `git add -A` commit (review finding 01:15 #2). Stash them (with untracked

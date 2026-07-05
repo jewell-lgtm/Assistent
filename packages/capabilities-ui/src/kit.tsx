@@ -23,14 +23,19 @@ export const Caption = ({ children }: PropsWithChildren) => <Text style={styles.
 export interface ButtonProps {
   readonly title: string
   readonly onPress: () => void
-  readonly variant?: "primary" | "secondary"
+  readonly variant?: "primary" | "secondary" | "danger"
   readonly disabled?: boolean
   readonly loading?: boolean
 }
 
 export const Button = ({ title, onPress, variant = "primary", disabled = false, loading = false }: ButtonProps) => (
   <TouchableOpacity
-    style={[styles.button, variant === "secondary" && styles.buttonSecondary, disabled && styles.buttonDisabled]}
+    style={[
+      styles.button,
+      variant === "secondary" && styles.buttonSecondary,
+      variant === "danger" && styles.buttonDanger,
+      disabled && styles.buttonDisabled
+    ]}
     onPress={onPress}
     disabled={disabled || loading}
   >
@@ -139,6 +144,7 @@ const styles = StyleSheet.create({
   caption: { fontSize: 12, color: "#666" },
   button: { backgroundColor: "#0a7", borderRadius: 6, padding: 10, alignItems: "center" },
   buttonSecondary: { backgroundColor: "#eee" },
+  buttonDanger: { backgroundColor: "#c0392b" },
   buttonDisabled: { opacity: 0.5 },
   buttonText: { color: "#fff", fontWeight: "700" },
   buttonTextSecondary: { color: "#0a7" },
