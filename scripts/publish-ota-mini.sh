@@ -8,8 +8,11 @@ RUNTIME_VERSION="1" # keep in sync with app.config.ts
 TS=$(date +%s)
 DEST="$HOME/assistant-data/updates/$RUNTIME_VERSION"
 
-# apiToken flows into extra.expoClient via `expo config` below
+# apiToken flows into extra.expoClient via `expo config` below — set -a so
+# plain KEY=value lines get exported to the expo child process, not just this shell
+set -a
 [ -f .DONOTCOMMIT/secrets.env ] && . ./.DONOTCOMMIT/secrets.env
+set +a
 
 pnpm install --frozen-lockfile
 node scripts/gen-userspace.mjs

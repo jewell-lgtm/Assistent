@@ -8,8 +8,11 @@ RUNTIME_VERSION="1" # keep in sync with app.config.ts runtimeVersion
 TS=$(date +%s)
 OUT="/tmp/assistant-ota-$TS"
 
-# apiToken flows into extra.expoClient via `expo config` below
+# apiToken flows into extra.expoClient via `expo config` below — set -a so
+# plain KEY=value lines get exported to the expo child process, not just this shell
+set -a
 [ -f .DONOTCOMMIT/secrets.env ] && . ./.DONOTCOMMIT/secrets.env
+set +a
 
 node scripts/gen-userspace.mjs
 pnpm --filter @assistant/app exec tsc --noEmit
