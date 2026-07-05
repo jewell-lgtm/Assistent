@@ -147,7 +147,9 @@ export const commitUserspace = (message: string) =>
     const root = yield* UserspaceDir
     return yield* Effect.tryPromise({
       try: async () => {
-        const git = (...args: Array<string>) => execFileP("git", ["-C", root, ...args])
+        // pod has no gitconfig — identity inline, not baked into the image
+        const git = (...args: Array<string>) =>
+          execFileP("git", ["-C", root, "-c", "user.name=assistant", "-c", "user.email=assistant@local", ...args])
         const { stdout: status } = await git("status", "--porcelain")
         if (status.trim() === "") return undefined
         await git("add", "-A")
