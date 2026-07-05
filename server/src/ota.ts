@@ -55,9 +55,14 @@ const assetUrl = (
 ) =>
   `${origin}/ota/assets?rv=${encodeURIComponent(runtimeVersion)}&ts=${encodeURIComponent(timestamp)}&path=${encodeURIComponent(filePath)}`
 
+// Asset URLs are generated from the REQUEST's origin. Behind Caddy the server
+// sees plain http, so trust X-Forwarded-Proto (Caddy sets it) — otherwise the
+// manifest hands the phone http:// asset URLs whose downloads fail and the
+// update never applies. Direct LAN access (no proxy header) stays http.
 const requestOrigin = (req: HttpServerRequest.HttpServerRequest) => {
   const host = req.headers["host"] ?? "localhost"
-  return `http://${host}`
+  const proto = req.headers["x-forwarded-proto"] ?? "http"
+  return `${proto}://${host}`
 }
 
 export const manifestHandler = Effect.gen(function* () {
