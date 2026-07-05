@@ -79,6 +79,25 @@ importers:
         specifier: ~6.0.3
         version: 6.0.3
 
+  packages/capabilities:
+    dependencies:
+      react:
+        specifier: '*'
+        version: 19.2.3
+    devDependencies:
+      '@effect/platform':
+        specifier: '*'
+        version: 0.96.2(effect@3.21.4)
+      '@types/react':
+        specifier: '*'
+        version: 19.2.17
+      effect:
+        specifier: '*'
+        version: 3.21.4
+      typescript:
+        specifier: '*'
+        version: 6.0.3
+
   server:
     dependencies:
       '@effect/platform':
@@ -4016,9 +4035,7 @@ snapshots:
       metro-runtime: 0.84.4
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/normalize-colors@0.86.0': {}
 

@@ -3,3 +3,5 @@
 node_modules/
 app/src/features.generated.ts
 .env
+app/android/
+app/ios/

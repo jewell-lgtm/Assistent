@@ -17,6 +17,6 @@ rsync -a "$OUT/" "mattisfrommars@mattmini.local:assistant-data/updates/$RUNTIME_
 rm -rf "$OUT"
 
 # retention: keep newest 5
-ssh mattisfrommars@mattmini.local "cd ~/assistant-data/updates/$RUNTIME_VERSION && ls | sort | head -n -5 | xargs -I{} rm -rf {}" || true
+ssh mattisfrommars@mattmini.local "cd ~/assistant-data/updates/$RUNTIME_VERSION && ls | sort -r | tail -n +6 | xargs -I{} rm -rf {}" || true
 
 echo "PUBLISHED update $RUNTIME_VERSION/$TS"
