@@ -22,6 +22,6 @@ if ! kubectl -n assistant rollout status deploy/assistant-server --timeout=180s;
   exit 1
 fi
 sleep 1
-curl -fsS --retry 5 --retry-delay 2 http://localhost:30080/healthz
+curl -fsS --retry 5 --retry-delay 2 http://localhost:30880/healthz
 echo
 echo "DEPLOYED $SHA"
