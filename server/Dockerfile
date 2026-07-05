@@ -11,6 +11,7 @@ COPY --from=pruner /app/out/json/ .
 RUN pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .
 COPY scripts/gen-userspace.mjs scripts/
+COPY scripts/bootstrap-userspace.mjs scripts/
 COPY scripts/uscheck scripts/uscheck
 # live userspace is hostPath-mounted at /repo in the pod — bridge it into the
 # image path the generated registry imports (../../userspace). Dangling at
@@ -26,4 +27,4 @@ ENV GIT_SHA=$GIT_SHA
 # symlink path so upward node_modules lookup finds /app/node_modules.
 ENV NODE_OPTIONS=--preserve-symlinks
 EXPOSE 8080
-CMD ["sh", "-c", "node scripts/gen-userspace.mjs && exec pnpm --filter @assistant/server start"]
+CMD ["sh", "-c", "node scripts/bootstrap-userspace.mjs && node scripts/gen-userspace.mjs && exec pnpm --filter @assistant/server start"]
