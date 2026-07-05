@@ -1,0 +1,20 @@
+{
+  "name": "@assistant/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform": "*",
+    "@effect/platform-node": "*",
+    "effect": "*",
+    "tsx": "*"
+  },
+  "devDependencies": {
+    "@types/node": "*",
+    "typescript": "*"
+  }
+}

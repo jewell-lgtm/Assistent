@@ -1,5 +1,5 @@
 .DONOTCOMMIT/
-/features/
+/userspace/
 node_modules/
 app/src/features.generated.ts
 .env

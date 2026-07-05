@@ -1,0 +1,9 @@
+{
+  "name": "local-assistent",
+  "private": true,
+  "workspaces": [
+    "server",
+    "app",
+    "packages/*"
+  ]
+}
