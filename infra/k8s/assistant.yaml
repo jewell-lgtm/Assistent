@@ -35,6 +35,12 @@ spec:
                 secretKeyRef:
                   name: assistant-secrets
                   key: API_TOKEN
+            - name: UPDATES_DIR
+              value: /data/updates
+          volumeMounts:
+            - name: updates
+              mountPath: /data/updates
+              readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 2
@@ -46,6 +52,11 @@ spec:
           resources:
             requests: { memory: 256Mi }
             limits: { memory: 2Gi }
+      volumes:
+        - name: updates
+          hostPath:
+            path: /Users/mattisfrommars/assistant-data/updates
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
