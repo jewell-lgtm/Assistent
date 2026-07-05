@@ -6,7 +6,10 @@ import { Data, Effect, Layer } from "effect"
 // local class so core can construct it without a capabilities-server dep.
 class PiError extends Data.TaggedError("PiError")<{ readonly message: string }> {}
 
-export const BASE_URL = "http://192.168.86.118:30880"
+// Public https via Caddy on the Lightsail box → wg tunnel → mini:30880, so the
+// app works from anywhere, not just the home LAN. (The old LAN URL
+// http://192.168.86.118:30880 only worked on home wifi.)
+export const BASE_URL = "https://assistant.wire.mattjewell.co.uk"
 export const API_TOKEN: string = Constants.expoConfig?.extra?.["apiToken"] ?? ""
 
 export interface ApiResponse {

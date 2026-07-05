@@ -15,6 +15,10 @@ import { connectSse, type SseFrame } from "./sse"
 // and GET status uses `status: "running"|"done"|"failed"` (note: "failed",
 // not "error") with the result nested under `.result`. Unknown/future
 // `.type` values are ignored rather than crashing.
+// The server BUFFERS every event per run and REPLAYS the full history on each
+// stream connect — so reconnecting rebuilds the transcript from scratch
+// (clear-then-replay, never append), and `: hb` comment frames every 15s keep
+// the staleness watchdog fed through quiet spells.
 
 interface CodeResult {
   readonly text: string
@@ -84,11 +88,14 @@ type Phase =
 const RECONCILE_POLL_MS = 5000
 // Watchdog for a silently-stalled SSE connection (carrier NAT/middlebox drops
 // the socket with no RST — XHR never fires onerror/onreadystatechange again).
-// No heartbeat frame exists server-side, so detect staleness client-side: if
-// nothing arrives for this long while "streaming", treat it like a network
-// drop and fall back to the reconcile-poll backstop.
+// The server sends a `: hb` comment every 15s, so a healthy-but-quiet stream
+// (long tool execution, model thinking) still shows BYTE activity (fed via
+// onActivity, not onEvent) — 60s of true byte silence means the connection is
+// genuinely dead, not merely idle.
 const STREAM_STALL_MS = 60000
 const STALL_CHECK_MS = 5000
+// Minimum gap between SSE reconnect attempts — beyond it, degrade to polling.
+const RECONNECT_MIN_GAP_MS = 5000
 
 interface OpsState {
   readonly busy: boolean
@@ -115,6 +122,7 @@ export const CodeScreen = () => {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastActivityRef = useRef(0)
+  const lastReconnectRef = useRef(0)
   const seqRef = useRef(0)
   const scrollRef = useRef<ScrollView>(null)
 
@@ -148,8 +156,11 @@ export const CodeScreen = () => {
   }
 
   // Reconnect backstop: GET plain status by runId. Used on SSE drop and on
-  // app-focus. Keeps polling at a low rate while the server still reports
-  // "running" so the UI doesn't stay stuck on stale state indefinitely.
+  // app-focus. While the run is still going: if the SSE stream is alive this
+  // is a no-op (never downgrade a healthy stream to "disconnected"); if the
+  // stream is dead, try to RECONNECT it (the server replays the full event
+  // buffer, so the transcript is rebuilt whole), throttled so a hard-down
+  // server degrades to slow polling instead of a reconnect storm.
   const reconcile = async (runId: string) => {
     const status = await fetchStatus(runId)
     if (!mountedRef.current || runIdRef.current !== runId) return
@@ -169,6 +180,15 @@ export const CodeScreen = () => {
       terminalRef.current = true
       stopPolling()
       setPhase({ p: "unauthorized" })
+    } else if (sseRef.current !== null) {
+      // still running AND the stream is alive — nothing to fix.
+      return
+    } else if (Date.now() - lastReconnectRef.current > RECONNECT_MIN_GAP_MS) {
+      lastReconnectRef.current = Date.now()
+      stopPolling()
+      setTranscript([]) // server replays the full buffer — rebuild, don't append
+      setPhase({ p: "streaming", runId })
+      startStream(runId)
     } else {
       setPhase({ p: "disconnected", runId })
       if (pollRef.current === null) {
@@ -193,8 +213,13 @@ export const CodeScreen = () => {
       `${BASE_URL}/api/system/code/${encodeURIComponent(runId)}/stream`,
       { authorization: `Bearer ${API_TOKEN}` },
       {
-        onEvent: (frame: SseFrame) => {
+        // Heartbeat comments (`: hb`) never reach onEvent — feed the watchdog
+        // on raw byte activity so quiet-but-alive streams aren't killed.
+        onActivity: () => {
           lastActivityRef.current = Date.now()
+        },
+        onEvent: (frame: SseFrame) => {
+          stopPolling() // a live event proves the stream is healthy — drop any parallel poll
           // No `event:` line is ever sent (bare `data: <json>` frames) — the
           // discriminator lives in the JSON payload's own `.type` field.
           let data: any
@@ -240,7 +265,7 @@ export const CodeScreen = () => {
               break
           }
         },
-        onHttpError: (status: number, body: string) => {
+        onHttpError: (status: number) => {
           closeSse()
           stopWatchdog()
           if (terminalRef.current) return // already resolved via reconcile/another path
@@ -254,15 +279,10 @@ export const CodeScreen = () => {
             setPhase({ p: "lost", runId })
             return
           }
-          let message = `HTTP ${status}`
-          try {
-            const parsed = JSON.parse(body)
-            if (typeof parsed?.error === "string") message = parsed.error
-          } catch {
-            // non-JSON body — fall through to generic HTTP status message
-          }
-          terminalRef.current = true
-          setPhase({ p: "error", runId, message })
+          // Anything else (5xx, proxy hiccup) is a STREAM problem, not a run
+          // problem — the server-side run keeps executing. Fall back to the
+          // status poll instead of declaring the run dead.
+          void reconcile(runId)
         },
         onNetworkError: () => {
           if (terminalRef.current) return

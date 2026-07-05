@@ -27,12 +27,16 @@ const config: ExpoConfig = {
   runtimeVersion: "1",
   updates: {
     enabled: true,
-    url: "http://192.168.86.118:30880/ota/api/manifest",
+    url: "https://assistant.wire.mattjewell.co.uk/ota/api/manifest",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
     requestHeaders: {
       authorization: `Bearer ${apiToken}`
-    }
+    },
+    // allow the runtime setUpdateURLAndRequestHeadersOverride() in App.tsx to
+    // repoint the *installed* APK's OTA check (baked with the old LAN URL) at
+    // the public https URL without a reinstall.
+    disableAntiBrickingMeasures: true
   },
   plugins: [
     ["expo-location", { isAndroidBackgroundLocationEnabled: true }],

@@ -83,13 +83,33 @@ const guardedTools = (root: string) =>
 
 // Inline extension (not disk-loaded, so it runs regardless of the forced
 // untrusted-project state above): counts turns via the real turn_start event
-// and hard-aborts a run that blows past the cap, loud not silent.
-const runawayGuardExtension: ExtensionFactory = (pi) => {
-  pi.on("turn_start", (event, ctx) => {
-    if (event.turnIndex < RUNAWAY_TURN_CAP) return
-    console.error(`[pi] runaway guard: aborting session after ${event.turnIndex} turns (cap ${RUNAWAY_TURN_CAP})`)
-    ctx.abort()
-  })
+// and hard-aborts a run that blows past the cap, loud not silent. Factory
+// takes an onTrip callback because session.abort() makes prompt() RESOLVE
+// normally — without the callback the caller would report a capped run as a
+// successful "done" and commit its truncated output (review finding 01:15 #1).
+const runawayGuard =
+  (onTrip: () => void): ExtensionFactory =>
+  (pi) => {
+    pi.on("turn_start", (event, ctx) => {
+      if (event.turnIndex < RUNAWAY_TURN_CAP) return
+      console.error(`[pi] runaway guard: aborting session after ${event.turnIndex} turns (cap ${RUNAWAY_TURN_CAP})`)
+      onTrip()
+      ctx.abort()
+    })
+  }
+
+// ONE Pi engine slot process-wide. Coding runs (/api/system/code) and generic
+// runs (/api/pi/run) share the same cwd, session storage dir, and provider
+// auth — overlapping them is undefined behavior (review finding 01:15 #6).
+// Tag records who holds the slot so release can't clobber a foreign owner.
+let engineBusy: string | undefined
+export const tryAcquireEngine = (tag: string): boolean => {
+  if (engineBusy !== undefined) return false
+  engineBusy = tag
+  return true
+}
+export const releaseEngine = (tag: string) => {
+  if (engineBusy === tag) engineBusy = undefined
 }
 
 // Real system-prompt channel (resourceLoader.appendSystemPrompt), not string-
@@ -126,14 +146,14 @@ const runawayGuardExtension: ExtensionFactory = (pi) => {
 // SettingsManager.create() defaults projectTrusted:true, so resolveProjectTrust
 // stays required (belt-and-braces per pi-tuning.md #6) even with noContextFiles
 // + noExtensions set — it's the only thing closing the SYSTEM.md vector.
-const codingResourceLoader = async (root: string) => {
+const codingResourceLoader = async (root: string, onRunaway: () => void) => {
   const loader = new DefaultResourceLoader({
     cwd: root,
     agentDir: getAgentDir(),
     noContextFiles: true,
     noExtensions: true,
     appendSystemPrompt: [AUTHORING_GUIDE],
-    extensionFactories: [runawayGuardExtension]
+    extensionFactories: [runawayGuard(onRunaway)]
   })
   await loader.reload({ resolveProjectTrust: async () => false })
   return loader
@@ -207,6 +227,11 @@ export const runPi = async (
   if (provider === "ollama") model = { ...model, baseUrl: env.ollamaBaseUrl }
 
   const coding = options.tools === "coding"
+  // session.abort() makes the outstanding prompt() resolve normally (not
+  // reject) — every abort path (timeout AND runaway guard) records its reason
+  // here so an aborted run is reported as a failure, never as a successful
+  // "done" with truncated output.
+  let abortReason: string | undefined
   const { session } = await createAgentSession({
     cwd: env.root,
     model,
@@ -214,23 +239,21 @@ export const runPi = async (
     ...(coding
       ? {
           customTools: [...guardedTools(env.root), typecheckTool],
-          resourceLoader: await codingResourceLoader(env.root)
+          resourceLoader: await codingResourceLoader(env.root, () => {
+            abortReason = `run aborted by runaway guard at ${RUNAWAY_TURN_CAP} turns`
+          })
         }
       : {}),
     sessionManager: SessionManager.create(env.root, piSessionDir())
   })
   const unsubscribe = onEvent !== undefined ? session.subscribe(onEvent) : undefined
-  // session.abort() makes the outstanding prompt() resolve normally (not
-  // reject) — track the timeout ourselves so a timed-out run is reported as
-  // a failure, not silently as a successful "done" with truncated output.
-  let timedOut = false
   const killer = setTimeout(() => {
-    timedOut = true
+    abortReason = `run exceeded ${RUN_TIMEOUT_MS}ms timeout and was aborted`
     void session.abort()
   }, RUN_TIMEOUT_MS)
   try {
     await session.prompt(options.prompt)
-    if (timedOut) throw new Error(`run exceeded ${RUN_TIMEOUT_MS}ms timeout and was aborted`)
+    if (abortReason !== undefined) throw new Error(abortReason)
     return {
       text: lastAssistantText(session.state.messages),
       model: `${model.provider}/${model.id}`
@@ -255,28 +278,48 @@ export const PiClientLive = Layer.effect(
     const root = yield* UserspaceDir
     const ollamaBaseUrl = yield* OllamaBaseUrl
     const defaultModel = yield* DefaultCodeModel
-    // single-flight: one run at a time, mirrors opsd's old busy semantics
-    let busy = false
+    // single-flight via the PROCESS-WIDE engine slot (shared with the async
+    // coding path in coding-runs.ts) — a coding run and a generic run must
+    // never overlap: same cwd, same session dir, same provider auth.
     return {
       run: (options: PiRunOptions) =>
         Effect.acquireUseRelease(
           Effect.suspend(() =>
-            busy
-              ? Effect.fail(new PiError({ message: "busy" }))
-              : Effect.sync(() => {
-                  busy = true
-                })
+            tryAcquireEngine("generic") ? Effect.void : Effect.fail(new PiError({ message: "busy" }))
           ),
           () =>
             Effect.tryPromise({
               try: () => runPi({ root, ollamaBaseUrl, defaultModel }, options),
               catch: (e) => new PiError({ message: String(e) })
             }),
-          () => Effect.sync(() => (busy = false))
+          () => Effect.sync(() => releaseEngine("generic"))
         )
     }
   })
 )
+
+/**
+ * A failed run must not leave partial edits in the hot-mounted working tree:
+ * they'd be live-served immediately AND silently swept into the next run's
+ * `git add -A` commit (review finding 01:15 #2). Stash them (with untracked
+ * files; gitignored data/vault are untouched by design) — recoverable via
+ * `git stash list` rather than hard-discarded. Returns true if residue existed.
+ */
+export const stashUserspaceResidue = (label: string) =>
+  Effect.gen(function* () {
+    const root = yield* UserspaceDir
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const git = (...args: Array<string>) =>
+          execFileP("git", ["-C", root, "-c", "user.name=assistant", "-c", "user.email=assistant@local", ...args])
+        const { stdout: status } = await git("status", "--porcelain")
+        if (status.trim() === "") return false
+        await git("stash", "push", "--include-untracked", "-m", `failed-run residue: ${label.slice(0, 120)}`)
+        return true
+      },
+      catch: (e) => new PiError({ message: `failed-run residue stash failed: ${String(e)}` })
+    })
+  })
 
 /** Commit whatever the agent changed in the userspace repo. */
 export const commitUserspace = (message: string) =>

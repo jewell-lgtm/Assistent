@@ -32,7 +32,7 @@ import { Effect } from "effect"
 import Constants from "expo-constants"
 import { api } from "./shared"
 
-const BASE_URL = "http://192.168.86.118:30880"
+const BASE_URL = "https://assistant.wire.mattjewell.co.uk"
 const API_TOKEN: string = Constants.expoConfig?.extra?.["apiToken"] ?? ""
 
 const clientEffect = HttpApiClient.make(api, {

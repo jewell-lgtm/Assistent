@@ -23,6 +23,10 @@ export interface SseFrame {
 export interface SseHandlers {
   /** One parsed `event:`/`data:` frame. Comment-only (`:ping`) and empty frames never reach here. */
   readonly onEvent: (frame: SseFrame) => void
+  /** Raw bytes arrived on the connection — fires for heartbeat/comment frames too.
+   *  This (not onEvent) is what a staleness watchdog should feed on: the server's
+   *  `: hb` comments prove liveness without producing any parsed event. */
+  readonly onActivity?: () => void
   /** Response completed with a non-200 status — `body` is the full response text (usually JSON `{error}`). */
   readonly onHttpError: (status: number, body: string) => void
   /** Transport-level failure (no response at all — DNS, connection refused, etc). */
@@ -84,28 +88,40 @@ export const connectSse = (url: string, headers: Record<string, string>, handler
     xhr.ontimeout = null
   }
 
+  const drain = () => {
+    const text = xhr.responseText ?? ""
+    if (text.length <= cursor) return
+    handlers.onActivity?.()
+    // \r\n normalization: RN's XHR delivers whatever bytes the server sent;
+    // normalize before buffering so the "\n\n" frame separator matches
+    // regardless of server line-ending style.
+    const chunk = text.slice(cursor).replace(/\r\n/g, "\n")
+    cursor = text.length
+    buffer += chunk
+    const { frames, rest } = splitFrames(buffer)
+    buffer = rest
+    for (const raw of frames) {
+      const frame = parseFrame(raw)
+      if (frame !== undefined) handlers.onEvent(frame)
+    }
+  }
+
   xhr.onreadystatechange = () => {
     if (closed) return
     if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED && xhr.status === 200) {
       sawOk = true
     }
     if (xhr.readyState === XMLHttpRequest.LOADING && sawOk) {
-      const text = xhr.responseText ?? ""
-      // \r\n normalization: RN's XHR delivers whatever bytes the server sent;
-      // normalize before buffering so the "\n\n" frame separator matches
-      // regardless of server line-ending style.
-      const chunk = text.slice(cursor).replace(/\r\n/g, "\n")
-      cursor = text.length
-      buffer += chunk
-      const { frames, rest } = splitFrames(buffer)
-      buffer = rest
-      for (const raw of frames) {
-        const frame = parseFrame(raw)
-        if (frame !== undefined) handlers.onEvent(frame)
-      }
+      drain()
     }
     if (xhr.readyState === XMLHttpRequest.DONE) {
       const wasOk = sawOk
+      if (wasOk) {
+        // A terminal frame can arrive coalesced with the connection close —
+        // RN's XHR may deliver those bytes only at DONE with no final LOADING
+        // callback. Drain BEFORE reporting close or the done event is lost.
+        drain()
+      }
       finish()
       if (wasOk) {
         handlers.onClose()

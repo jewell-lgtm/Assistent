@@ -73,6 +73,15 @@ const piRun = (fixed?: Partial<PiRunOptions>) =>
     if (parsed === undefined) {
       return yield* HttpServerResponse.json({ error: "prompt required" }, { status: 400 })
     }
+    // A capability this route doesn't offer must be a loud 4xx, not a silent
+    // downgrade: a caller asking for coding tools would otherwise get a
+    // plausible 200 reply with nothing written and nothing committed.
+    if (fixed?.tools === "none" && parsed.tools === "coding") {
+      return yield* HttpServerResponse.json(
+        { error: "coding tools are not available on this endpoint — use POST /api/system/code" },
+        { status: 400 }
+      )
+    }
     const options = { ...parsed, ...fixed }
     const pi = yield* PiClient
     return yield* pi.run(options).pipe(
