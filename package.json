@@ -1,9 +1,12 @@
 {
   "name": "local-assistent",
   "private": true,
-  "workspaces": [
-    "server",
-    "app",
-    "packages/*"
-  ]
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev"
+  },
+  "devDependencies": {
+    "turbo": "^2"
+  }
 }

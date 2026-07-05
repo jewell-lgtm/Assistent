@@ -1,0 +1,4 @@
+
+> @assistant/server@ typecheck /Users/mattjewell/Code/jewell-lgtm/local-assistent/server
+> tsc --noEmit
+
