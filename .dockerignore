@@ -1,0 +1,10 @@
+# build context = repo root (redeploy.sh: -f server/Dockerfile .)
+# pruner stage does COPY . . — keep the context lean and secret-free
+**/node_modules
+.git
+.DONOTCOMMIT
+userspace
+**/.expo
+**/.turbo
+app/android
+**/*.log
