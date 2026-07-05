@@ -92,6 +92,14 @@ export const manifestHandler = Effect.gen(function* () {
       key: sha256(buf, "hex").slice(0, 32)
     }))
 
+  // publish scripts drop `expo config --type public` next to the export —
+  // without extra.expoClient, OTA-launched apps get Constants.expoConfig=null
+  // and the apiToken reads go empty (401s everywhere).
+  const expoClient = yield* fs.readFileString(path.join(update.dir, "expoConfig.json")).pipe(
+    Effect.map((raw) => JSON.parse(raw) as unknown),
+    Effect.orElseSucceed(() => undefined)
+  )
+
   const bundle = yield* hashOf(android.bundle)
   const assets = yield* Effect.forEach(android.assets, (a) =>
     Effect.map(hashOf(a.path), (h) => ({
@@ -116,7 +124,7 @@ export const manifestHandler = Effect.gen(function* () {
     },
     assets,
     metadata: {},
-    extra: {}
+    extra: expoClient === undefined ? {} : { expoClient }
   }
 
   return yield* HttpServerResponse.json(manifest, {

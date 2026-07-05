@@ -1,7 +1,11 @@
 .DONOTCOMMIT/
 /userspace/
+server/src/userspace.gen.ts
+app/src/userspace.gen.ts
 node_modules/
 app/src/features.generated.ts
 .env
+.turbo/
+**/.turbo/
 app/android/
 app/ios/

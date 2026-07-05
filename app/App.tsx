@@ -1,10 +1,26 @@
+import { NavigationContainer } from "@react-navigation/native"
 import { StatusBar } from "expo-status-bar"
+import * as Updates from "expo-updates"
 import { useEffect, useState } from "react"
 import { StyleSheet, Text, View } from "react-native"
-import * as Updates from "expo-updates"
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context"
+import { RootTabs } from "./src/RootTabs"
 
-// E1 marker: bump this string, publish OTA, expect it on the phone without reinstall.
+// E1 proof surface: bump this string, publish OTA, expect it on the phone without reinstall.
 const OTA_MARKER = "ota-v2"
+
+// The E1 proof surface, shrunk to a header strip so tabs get the screen.
+const OtaHeader = ({ status }: { status: string }) => {
+  const insets = useSafeAreaInsets()
+  return (
+    <View style={[styles.header, { paddingTop: insets.top + 4 }]}>
+      <Text style={styles.headerText}>
+        {OTA_MARKER} · {Updates.updateId?.slice(0, 8) ?? "embedded"} · rt {Updates.runtimeVersion} ·{" "}
+        {status}
+      </Text>
+    </View>
+  )
+}
 
 export default function App() {
   const [status, setStatus] = useState("checking for update…")
@@ -31,20 +47,17 @@ export default function App() {
   }, [])
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Assistant</Text>
-      <Text style={styles.marker}>{OTA_MARKER}</Text>
-      <Text style={styles.meta}>updateId: {Updates.updateId ?? "embedded"}</Text>
-      <Text style={styles.meta}>runtime: {Updates.runtimeVersion}</Text>
-      <Text style={styles.meta}>{status}</Text>
+    <SafeAreaProvider>
+      <OtaHeader status={status} />
+      <NavigationContainer>
+        <RootTabs />
+      </NavigationContainer>
       <StatusBar style="auto" />
-    </View>
+    </SafeAreaProvider>
   )
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#fff", alignItems: "center", justifyContent: "center", gap: 8 },
-  title: { fontSize: 28, fontWeight: "700" },
-  marker: { fontSize: 20, color: "#0a7" },
-  meta: { fontSize: 12, color: "#666" }
+  header: { backgroundColor: "#f2f2f2", paddingBottom: 4, paddingHorizontal: 8 },
+  headerText: { fontSize: 11, color: "#666", textAlign: "center" }
 })

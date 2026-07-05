@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@assistant/capabilities-server/server": ["../../packages/capabilities-server/src/server.ts"],
+      "@assistant/capabilities-server/pi": ["../../packages/capabilities-server/src/pi.ts"]
+    }
+  },
+  "include": ["../../userspace/features/*/server.ts", "../../userspace/features/*/shared.ts"]
+}

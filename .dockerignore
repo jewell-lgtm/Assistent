@@ -4,6 +4,7 @@
 .git
 .DONOTCOMMIT
 userspace
+**/userspace.gen.ts
 **/.expo
 **/.turbo
 app/android

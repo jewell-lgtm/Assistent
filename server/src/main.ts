@@ -6,6 +6,7 @@ import { FetchHttpClient } from "@effect/platform"
 import { PiClientLive } from "./code.js"
 import { otaRoutes } from "./ota.js"
 import { systemRoutes } from "./system.js"
+import { userspaceRoutes } from "./userspace.js"
 
 const GitSha = Config.string("GIT_SHA").pipe(Config.withDefault("dev"))
 const Port = Config.integer("PORT").pipe(Config.withDefault(8080))
@@ -32,17 +33,23 @@ const bearerAuth = HttpMiddleware.make((app) =>
   })
 )
 
-const router = HttpRouter.empty.pipe(
-  HttpRouter.get("/healthz", healthz),
-  HttpRouter.get(
-    "/api/whoami",
-    HttpServerResponse.json({ app: "local-assistent", experiment: true })
-  ),
-  otaRoutes,
-  systemRoutes
+// userspace loading is async (dynamic imports) → router assembly is an Effect
+const router = Effect.map(userspaceRoutes, (withUserspace) =>
+  HttpRouter.empty.pipe(
+    HttpRouter.get("/healthz", healthz),
+    HttpRouter.get(
+      "/api/whoami",
+      HttpServerResponse.json({ app: "local-assistent", experiment: true })
+    ),
+    otaRoutes,
+    systemRoutes,
+    withUserspace
+  )
 )
 
-const app = router.pipe(bearerAuth, HttpServer.serve(HttpMiddleware.logger))
+const app = Layer.unwrapEffect(
+  Effect.map(router, (r) => r.pipe(bearerAuth, HttpServer.serve(HttpMiddleware.logger)))
+)
 
 const ServerLive = Layer.unwrapEffect(
   Effect.map(Port, (port) => NodeHttpServer.layer(() => createServer(), { port, host: "0.0.0.0" }))

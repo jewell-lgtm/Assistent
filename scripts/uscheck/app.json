@@ -1,0 +1,12 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@assistant/capabilities-ui/app": ["../../packages/capabilities-ui/src/app.ts"],
+      "@assistant/capabilities-ui/pi": ["../../packages/capabilities-ui/src/pi.ts"],
+      "@assistant/capabilities-server/pi": ["../../packages/capabilities-server/src/pi.ts"]
+    }
+  },
+  "include": ["../../userspace/features/*/app.tsx", "../../userspace/features/*/shared.ts"]
+}

@@ -22,6 +22,8 @@ const config: ExpoConfig = {
       "POST_NOTIFICATIONS"
     ]
   },
+  // runtime-readable via expo-constants (embedded at prebuild/publish time)
+  extra: { apiToken },
   runtimeVersion: "1",
   updates: {
     enabled: true,

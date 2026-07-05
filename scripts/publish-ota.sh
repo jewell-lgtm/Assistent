@@ -4,13 +4,24 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-RUNTIME_VERSION=$(node -e "import('./app/app.config.ts')" 2>/dev/null || true)
 RUNTIME_VERSION="1" # keep in sync with app.config.ts runtimeVersion
 TS=$(date +%s)
 OUT="/tmp/assistant-ota-$TS"
 
+# apiToken flows into extra.expoClient via `expo config` below
+[ -f .DONOTCOMMIT/secrets.env ] && . ./.DONOTCOMMIT/secrets.env
+
+node scripts/gen-userspace.mjs
 pnpm --filter @assistant/app exec tsc --noEmit
+if ls userspace/features/*/app.tsx >/dev/null 2>&1; then
+  pnpm --filter @assistant/app exec tsc --noEmit -p ../scripts/uscheck/app.json
+fi
+if ls userspace/features/*/server.ts >/dev/null 2>&1; then
+  pnpm --filter @assistant/server exec tsc --noEmit -p ../scripts/uscheck/server.json
+fi
 (cd app && npx expo export --platform android --output-dir "$OUT")
+# OTA manifest serves this as extra.expoClient (Constants.expoConfig on device)
+(cd app && npx expo config --json --type public > "$OUT/expoConfig.json")
 
 ssh mattisfrommars@mattmini.local "mkdir -p ~/assistant-data/updates/$RUNTIME_VERSION"
 rsync -a "$OUT/" "mattisfrommars@mattmini.local:assistant-data/updates/$RUNTIME_VERSION/$TS/"
