@@ -1,7 +1,8 @@
 import { HttpApiBuilder, HttpRouter, HttpServerResponse } from "@effect/platform"
 import { PiClient } from "@assistant/capabilities-server/pi"
-import type { ChatCapability, ServerCapability } from "@assistant/capabilities-server/server"
-import { Cause, Effect, Exit, Layer } from "effect"
+import type { ChatCapability, ServerCapability, UserspaceServices } from "@assistant/capabilities-server/server"
+import { Cause, Config, Effect, Exit, Layer } from "effect"
+import { persistenceLive } from "./persistence.js"
 import { userspaceServer } from "./userspace.gen.js"
 
 // Failure-isolated userspace loader: a module that throws at import or mount
@@ -12,7 +13,14 @@ export const chatCapabilities: Array<ChatCapability> = []
 
 type AnyRouter = HttpRouter.HttpRouter<any, any>
 
-const buildModule = (piLayer: Layer.Layer<PiClient>, caps: ReadonlyArray<ServerCapability>) =>
+const UserspaceDir = Config.string("USERSPACE_DIR").pipe(Config.withDefault("/repo/userspace"))
+
+const buildModule = (
+  root: string,
+  piLayer: Layer.Layer<PiClient>,
+  featureName: string,
+  caps: ReadonlyArray<ServerCapability>
+) =>
   Effect.gen(function* () {
     let router: AnyRouter = HttpRouter.empty
     const chats: Array<ChatCapability> = []
@@ -21,7 +29,13 @@ const buildModule = (piLayer: Layer.Layer<PiClient>, caps: ReadonlyArray<ServerC
         chats.push(cap)
         continue
       }
-      const prefix = `/api/features/${cap.name}` as const
+      // per-feature namespace: keyed by featureName (the SAFE_NAME-sanitized
+      // userspace/features/<dir> name), NEVER cap.name — cap.name is a string
+      // the feature's own server.ts declares and is not validated, so keying
+      // on it would let a feature read/write another feature's store (or
+      // mount over another feature's route prefix) just by naming it.
+      const featureLayer: Layer.Layer<UserspaceServices> = Layer.merge(piLayer, persistenceLive(root, featureName))
+      const prefix = `/api/features/${featureName}` as const
       const app =
         cap.kind === "http"
           ? yield* HttpApiBuilder.httpApp.pipe(
@@ -29,14 +43,25 @@ const buildModule = (piLayer: Layer.Layer<PiClient>, caps: ReadonlyArray<ServerC
                 Layer.mergeAll(
                   HttpApiBuilder.api(cap.api as any).pipe(
                     Layer.provide(cap.live as unknown as Layer.Layer<any, any, any>),
-                    Layer.provide(piLayer)
+                    Layer.provide(featureLayer)
                   ),
                   HttpApiBuilder.Router.Live,
                   HttpApiBuilder.Middleware.layer
                 ) as Layer.Layer<any, any, never>
               )
             )
-          : Effect.provide(cap.router, piLayer)
+          : // Resolve featureLayer's services to a Context ONCE here (not via
+            // Effect.provide(cap.router, featureLayer) stored unexecuted): a
+            // mounted app value is re-interpreted from scratch on every
+            // request (HttpRouter's mount dispatch does `Effect.flatMap(route
+            // .handler, ...)` on the same stored value each time), so
+            // providing a Layer there rebuilds it — and its semaphore — per
+            // request, defeating persistence.ts's single-mutex guarantee.
+            // Providing an already-built Context is a plain, request-cheap
+            // merge, not a rebuild. Layer.build needs a Scope; scope it
+            // immediately since neither piLayer nor persistenceLive hold any
+            // resource that needs to outlive construction.
+            Effect.provide(cap.router, yield* Effect.scoped(Layer.build(featureLayer)))
       router = HttpRouter.mountApp(router, prefix, app as any)
     }
     return { router, chats }
@@ -44,13 +69,14 @@ const buildModule = (piLayer: Layer.Layer<PiClient>, caps: ReadonlyArray<ServerC
 
 /** Load all userspace modules; returns a router transform (systemRoutes idiom). */
 export const userspaceRoutes = Effect.gen(function* () {
+  const root = yield* UserspaceDir
   const piLayer = Layer.succeed(PiClient, yield* PiClient)
   const loaded: Array<string> = []
   const failed: Array<{ name: string; error: string }> = []
   let router: AnyRouter = HttpRouter.empty
   for (const entry of userspaceServer) {
     const exit = yield* Effect.tryPromise({ try: () => entry.load(), catch: String }).pipe(
-      Effect.flatMap((caps) => buildModule(piLayer, caps)),
+      Effect.flatMap((caps) => buildModule(root, piLayer, entry.name, caps)),
       Effect.exit
     )
     if (Exit.isSuccess(exit)) {

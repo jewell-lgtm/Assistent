@@ -1,12 +1,13 @@
 import type { HttpApi, HttpRouter } from "@effect/platform"
 import type { Layer } from "effect"
+import type { Persistence } from "./persistence.js"
 import type { PiClient, PiRouting } from "./pi.js"
 
 // Capabilities the server userspace may export. The loader consumes these with
 // failure isolation (a broken module is skipped + reported, never crashes core).
 
 /** Services core provides to userspace server modules. Extend as more land. */
-export type UserspaceServices = PiClient
+export type UserspaceServices = PiClient | Persistence
 
 /**
  * An HTTP surface. Define the api with Effect `HttpApi` in the module's shared/

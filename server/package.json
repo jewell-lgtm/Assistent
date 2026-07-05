@@ -13,10 +13,11 @@
     "@effect/platform": "*",
     "@effect/platform-node": "*",
     "effect": "*",
-    "tsx": "*"
+    "tsx": "*",
+    "typebox": "*",
+    "typescript": "*"
   },
   "devDependencies": {
-    "@types/node": "*",
-    "typescript": "*"
+    "@types/node": "*"
   }
 }

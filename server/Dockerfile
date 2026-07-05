@@ -11,6 +11,7 @@ COPY --from=pruner /app/out/json/ .
 RUN pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .
 COPY scripts/gen-userspace.mjs scripts/
+COPY scripts/uscheck scripts/uscheck
 # live userspace is hostPath-mounted at /repo in the pod — bridge it into the
 # image path the generated registry imports (../../userspace). Dangling at
 # build time (gen then emits empty registries → fresh clone still boots);
