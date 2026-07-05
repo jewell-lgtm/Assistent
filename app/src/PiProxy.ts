@@ -9,21 +9,39 @@ class PiError extends Data.TaggedError("PiError")<{ readonly message: string }> 
 export const BASE_URL = "http://192.168.86.118:30880"
 export const API_TOKEN: string = Constants.expoConfig?.extra?.["apiToken"] ?? ""
 
-/** POST json to core server, PiError on non-200/network failure. */
-export const apiPost = (apiPath: string, body: unknown) =>
+export interface ApiResponse {
+  readonly status: number
+  readonly json: any
+}
+
+/** Same request core, but surfaces the status code instead of throwing on non-2xx —
+ * for endpoints where a non-2xx is a meaningful, distinct state (409 busy) rather
+ * than a bare failure. PiError only for actual transport/network failure. */
+const request = (method: "GET" | "POST", apiPath: string, body?: unknown) =>
   Effect.tryPromise({
-    try: async () => {
+    try: async (): Promise<ApiResponse> => {
       const res = await fetch(`${BASE_URL}${apiPath}`, {
-        method: "POST",
+        method,
         headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
-        body: JSON.stringify(body)
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {})
       })
       const json: any = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`)
-      return json
+      return { status: res.status, json }
     },
     catch: (e) => new PiError({ message: e instanceof Error ? e.message : String(e) })
   })
+
+export const apiRequest = request
+
+/** POST json to core server, PiError on non-200/network failure. */
+export const apiPost = (apiPath: string, body: unknown) =>
+  request("POST", apiPath, body).pipe(
+    Effect.flatMap(({ status, json }) =>
+      status >= 200 && status < 300
+        ? Effect.succeed(json)
+        : Effect.fail(new PiError({ message: json.error ?? `HTTP ${status}` }))
+    )
+  )
 
 export const PiProxyLive = Layer.succeed(PiProxy, {
   run: (options: PiRunOptions) =>

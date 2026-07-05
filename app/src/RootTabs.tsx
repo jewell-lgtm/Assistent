@@ -5,6 +5,7 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
 import { Effect } from "effect"
 import { useState, type ComponentType } from "react"
 import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native"
+import { CodeScreen } from "./CodeScreen"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { apiPost, PiProxyLive } from "./PiProxy"
 import { userspaceApp } from "./userspace.gen"
@@ -15,14 +16,6 @@ const runPi = (prompt: string) =>
       Effect.flatMap((pi) => pi.run({ prompt })),
       Effect.provide(PiProxyLive),
       Effect.map((r) => `[${r.model}]\n${r.text}`),
-      Effect.catchAll((e) => Effect.succeed(`PiError: ${e.message}`))
-    )
-  )
-
-const runCode = (prompt: string) =>
-  Effect.runPromise(
-    apiPost("/api/system/code", { prompt }).pipe(
-      Effect.map((json) => JSON.stringify(json, null, 2)),
       Effect.catchAll((e) => Effect.succeed(`PiError: ${e.message}`))
     )
   )
@@ -63,9 +56,6 @@ const PromptScreen = ({ note, submit }: { note: string; submit: (prompt: string)
 
 const ChatScreen = () => (
   <PromptScreen note="chat lands in E4 — this exercises PiProxy → /api/pi/run" submit={runPi} />
-)
-const CodeScreen = () => (
-  <PromptScreen note="self-mod coder → /api/system/code (writes userspace, auto-commits)" submit={runCode} />
 )
 
 type Tab = {

@@ -8,6 +8,7 @@ import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import {
+  type AgentSessionEvent,
   AuthStorage,
   createAgentSession,
   type CreateAgentSessionOptions,
@@ -187,9 +188,13 @@ const lastAssistantText = (messages: ReadonlyArray<any>): string => {
   return ""
 }
 
-const runPi = async (
+// onEvent is the SSE bridge's hook (server/src/coding-runs.ts): the generic
+// tools:"none" path (PiClientLive below) never passes it, so its behavior is
+// unchanged — this param only matters to the async coding-run path.
+export const runPi = async (
   env: { root: string; ollamaBaseUrl: string; defaultModel: string },
-  options: PiRunOptions
+  options: PiRunOptions,
+  onEvent?: (event: AgentSessionEvent) => void
 ) => {
   const routing = options.routing ?? "default"
   const provider = PROVIDERS[routing]
@@ -214,18 +219,35 @@ const runPi = async (
       : {}),
     sessionManager: SessionManager.create(env.root, piSessionDir())
   })
-  const killer = setTimeout(() => void session.abort(), RUN_TIMEOUT_MS)
+  const unsubscribe = onEvent !== undefined ? session.subscribe(onEvent) : undefined
+  // session.abort() makes the outstanding prompt() resolve normally (not
+  // reject) — track the timeout ourselves so a timed-out run is reported as
+  // a failure, not silently as a successful "done" with truncated output.
+  let timedOut = false
+  const killer = setTimeout(() => {
+    timedOut = true
+    void session.abort()
+  }, RUN_TIMEOUT_MS)
   try {
     await session.prompt(options.prompt)
+    if (timedOut) throw new Error(`run exceeded ${RUN_TIMEOUT_MS}ms timeout and was aborted`)
     return {
       text: lastAssistantText(session.state.messages),
       model: `${model.provider}/${model.id}`
     }
   } finally {
     clearTimeout(killer)
+    unsubscribe?.()
     session.dispose()
   }
 }
+
+/** Same env triple runPi() takes, resolved from Config — shared by PiClientLive and the async coding-run path (coding-runs.ts). */
+export const codingEnv = Effect.all({
+  root: UserspaceDir,
+  ollamaBaseUrl: OllamaBaseUrl,
+  defaultModel: DefaultCodeModel
+})
 
 export const PiClientLive = Layer.effect(
   PiClient,
