@@ -42,7 +42,8 @@ createServer((req, res) => {
     } catch {}
     const child = spawn("sh", [script, message], {
       cwd: CWD,
-      env: { ...process.env, PATH }
+      env: { ...process.env, PATH },
+      stdio: ["ignore", "pipe", "pipe"]
     })
     let out = ""
     const cap = (c) => (out = (out + c).slice(-16000))
