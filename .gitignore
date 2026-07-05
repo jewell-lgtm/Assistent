@@ -1,0 +1,5 @@
+.DONOTCOMMIT/
+/features/
+node_modules/
+app/src/features.generated.ts
+.env
