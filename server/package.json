@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@assistant/capabilities-server": "workspace:*",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "@effect/platform": "*",
     "@effect/platform-node": "*",
     "effect": "*",

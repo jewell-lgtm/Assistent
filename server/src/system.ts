@@ -6,8 +6,10 @@ import {
   HttpServerRequest,
   HttpServerResponse
 } from "@effect/platform"
+import { PiClient, type PiRunOptions } from "@assistant/capabilities-server/pi"
 import { Config, Effect, Redacted } from "effect"
 import * as path from "node:path"
+import { commitUserspace } from "./code.js"
 
 const OpsdUrl = Config.string("OPSD_URL").pipe(Config.withDefault("http://host.orb.internal:9876"))
 const OpsdToken = Config.redacted("OPSD_TOKEN")
@@ -46,10 +48,52 @@ const motd = Effect.gen(function* () {
   return yield* HttpServerResponse.text(raw, { headers: { "content-type": "application/json" } })
 })
 
+const parsePiRun = (body: string): PiRunOptions | undefined => {
+  try {
+    const json = JSON.parse(body)
+    const prompt = json.prompt ?? json.message
+    if (typeof prompt !== "string" || prompt === "") return undefined
+    return {
+      prompt,
+      routing: json.routing === "private" ? "private" : "default",
+      ...(typeof json.model === "string" ? { model: json.model } : {}),
+      tools: json.tools === "coding" ? "coding" : "none"
+    }
+  } catch {
+    return undefined
+  }
+}
+
+const piRun = (fixed?: Partial<PiRunOptions>) =>
+  Effect.gen(function* () {
+    const req = yield* HttpServerRequest.HttpServerRequest
+    const body = yield* req.text
+    const parsed = parsePiRun(body)
+    if (parsed === undefined) {
+      return yield* HttpServerResponse.json({ error: "prompt required" }, { status: 400 })
+    }
+    const options = { ...parsed, ...fixed }
+    const pi = yield* PiClient
+    return yield* pi.run(options).pipe(
+      Effect.flatMap((result) =>
+        options.tools === "coding"
+          ? Effect.map(commitUserspace(options.prompt), (commit) => ({ ...result, commit }))
+          : Effect.succeed(result)
+      ),
+      Effect.flatMap((result) => HttpServerResponse.json({ ok: true, ...result })),
+      Effect.catchTag("PiError", (e) =>
+        HttpServerResponse.json({ error: e.message }, { status: e.message === "busy" ? 409 : 500 })
+      )
+    )
+  })
+
 export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
   router.pipe(
     HttpRouter.post("/api/system/redeploy", proxy("/redeploy")),
     HttpRouter.post("/api/system/publish-ota", proxy("/publish-ota")),
-    HttpRouter.post("/api/system/code", proxy("/code")),
+    // the self-mod coder: in-process Pi (replaced the codex shell-out via opsd /code)
+    HttpRouter.post("/api/system/code", piRun({ tools: "coding" })),
+    // generic engine access — the endpoint behind the app-side PiProxy
+    HttpRouter.post("/api/pi/run", piRun()),
     HttpRouter.get("/api/motd", motd)
   )

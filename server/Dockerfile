@@ -1,5 +1,5 @@
 FROM node:22-alpine
-RUN npm install -g pnpm@10.20.0
+RUN apk add --no-cache git ripgrep && npm install -g pnpm@10.20.0
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY server/package.json server/

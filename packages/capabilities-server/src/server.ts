@@ -1,8 +1,12 @@
 import type { HttpApi, HttpRouter } from "@effect/platform"
 import type { Layer } from "effect"
+import type { PiClient, PiRouting } from "./pi.js"
 
 // Capabilities the server userspace may export. The loader consumes these with
 // failure isolation (a broken module is skipped + reported, never crashes core).
+
+/** Services core provides to userspace server modules. Extend as more land. */
+export type UserspaceServices = PiClient
 
 /**
  * An HTTP surface. Define the api with Effect `HttpApi` in the module's shared/
@@ -13,17 +17,17 @@ export interface HttpCapability {
   readonly kind: "http"
   readonly name: string
   readonly api: HttpApi.HttpApi.Any
-  readonly live: Layer.Layer<never, never, never>
+  readonly live: Layer.Layer<never, never, UserspaceServices>
 }
 
 /** Simpler escape hatch: a raw Effect router (no derived client). */
 export interface HttpRouterCapability {
   readonly kind: "http-router"
   readonly name: string
-  readonly router: HttpRouter.HttpRouter<unknown, never>
+  readonly router: HttpRouter.HttpRouter<unknown, UserspaceServices>
 }
 
-/** Contributes task types (system prompt + engine routing) to the chat registry. */
+/** Contributes task types (system prompt + routing) to the chat registry. */
 export interface ChatCapability {
   readonly kind: "chat"
   readonly name: string
@@ -31,9 +35,8 @@ export interface ChatCapability {
     readonly id: string
     readonly name: string
     readonly systemPrompt: string
-    readonly engine: "ollama" | "codex" | "pi"
-    readonly model: string
-    readonly localOnly: boolean
+    readonly routing: PiRouting
+    readonly model?: string
   }>
 }
 

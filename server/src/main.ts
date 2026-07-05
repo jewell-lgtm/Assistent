@@ -3,6 +3,7 @@ import { NodeContext, NodeHttpServer, NodeRuntime } from "@effect/platform-node"
 import { Config, Effect, Layer, Redacted } from "effect"
 import { createServer } from "node:http"
 import { FetchHttpClient } from "@effect/platform"
+import { PiClientLive } from "./code.js"
 import { otaRoutes } from "./ota.js"
 import { systemRoutes } from "./system.js"
 
@@ -49,6 +50,9 @@ const ServerLive = Layer.unwrapEffect(
 
 NodeRuntime.runMain(
   Layer.launch(
-    Layer.provide(app, Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer))
+    Layer.provide(
+      app,
+      Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer, PiClientLive)
+    )
   )
 )

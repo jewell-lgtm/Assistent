@@ -44,12 +44,18 @@ spec:
               value: /data/updates
             - name: REPO_DIR
               value: /repo
+            - name: PI_CODING_AGENT_DIR
+              value: /pi-agent
+            - name: OLLAMA_BASE_URL
+              value: http://host.orb.internal:11434/v1
           volumeMounts:
             - name: updates
               mountPath: /data/updates
               readOnly: true
             - name: repo
               mountPath: /repo
+            - name: pi-agent
+              mountPath: /pi-agent # rw: oauth refresh writes back to auth.json
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 2
@@ -69,6 +75,10 @@ spec:
         - name: repo
           hostPath:
             path: /Users/mattisfrommars/assistant
+            type: Directory
+        - name: pi-agent
+          hostPath:
+            path: /Users/mattisfrommars/.pi/agent
             type: Directory
 ---
 apiVersion: v1
