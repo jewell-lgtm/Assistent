@@ -23,6 +23,12 @@ fi
 SHA=$(git rev-parse --short HEAD)
 docker build -t "assistant-server:$SHA" --build-arg "GIT_SHA=$SHA" -f server/Dockerfile .
 sed "s/IMAGE_TAG/$SHA/" infra/k8s/assistant.yaml | kubectl apply -f -
+# a userspace-only self-mod commit never changes $SHA (userspace is a separate
+# repo), so kubectl apply alone sees an identical spec and never rolls a new
+# pod — but gen-userspace.mjs only regenerates the feature registry at boot.
+# Force a restart every time so a pod is always freshly booted against
+# whatever's currently on disk at /repo/userspace.
+kubectl -n assistant rollout restart deploy/assistant-server
 if ! kubectl -n assistant rollout status deploy/assistant-server --timeout=180s; then
   echo "ROLLOUT FAILED — undoing" >&2
   kubectl -n assistant rollout undo deploy/assistant-server
