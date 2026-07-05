@@ -509,13 +509,22 @@ export const CodeScreen = () => {
             </ScrollView>
           </>
         )}
-        {publish.ok && (
-          <>
-            <Spacer size={8} />
-            <Button title={ota.busy ? "checking…" : "Reload app (apply OTA update)"} variant="secondary" onPress={onReload} loading={ota.busy} />
-            {ota.status !== null && <Caption>{ota.status}</Caption>}
-          </>
-        )}
+        <Spacer size={20} />
+        {/* Always available — not gated behind a publish in this session: the
+            update may have been published from anywhere (another device, the
+            server itself). Shows the RUNNING bundle's identity so "am I on the
+            latest?" is answerable at a glance. */}
+        <Caption>
+          bundle: {__DEV__ ? "dev" : `${Updates.updateId?.slice(0, 8) ?? "embedded"} · ${Updates.createdAt?.toISOString?.() ?? "APK build"}`}
+        </Caption>
+        <Spacer size={4} />
+        <Button
+          title={ota.busy ? "checking…" : "Check for update & reload"}
+          variant="secondary"
+          onPress={() => void onReload()}
+          loading={ota.busy}
+        />
+        {ota.status !== null && <Caption>{ota.status}</Caption>}
         <Spacer size={40} />
       </ScrollView>
     </Screen>
