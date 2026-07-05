@@ -19,14 +19,22 @@ const healthz = Effect.gen(function* () {
 
 const startedAt = new Date().toISOString()
 
-// bearer auth on everything except /healthz
+// bearer auth on everything except /healthz. API_TOKEN may hold several
+// comma-separated tokens during a rotation window — any listed token
+// authenticates. Rotation without deadlock: set "new,old" (pod restart),
+// publish the OTA bundle carrying "new" (the phone still FETCHES it with the
+// old baked token), then drop ",old" once the phone is confirmed on "new".
 const bearerAuth = HttpMiddleware.make((app) =>
   Effect.gen(function* () {
     const req = yield* HttpServerRequest.HttpServerRequest
     if (req.url === "/healthz") return yield* app
     const token = yield* ApiToken
     const header = req.headers["authorization"]
-    if (header !== `Bearer ${Redacted.value(token)}`) {
+    const accepted = Redacted.value(token)
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+    if (header === undefined || !accepted.some((t) => header === `Bearer ${t}`)) {
       return yield* HttpServerResponse.json({ error: "unauthorized" }, { status: 401 })
     }
     return yield* app
