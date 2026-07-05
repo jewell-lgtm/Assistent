@@ -112,6 +112,8 @@ export const CodeScreen = () => {
   const [phase, setPhase] = useState<Phase>({ p: "idle" })
   const [transcript, setTranscript] = useState<ReadonlyArray<TranscriptLine>>([])
   const [pipeline, setPipeline] = useState<Pipeline>({ step: "idle" })
+  const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({ busy: false, status: null })
+  const [resetStatus, setResetStatus] = useState<string | null>(null)
 
   const mountedRef = useRef(true)
   const runIdRef = useRef<string | null>(null)
@@ -350,11 +352,13 @@ export const CodeScreen = () => {
     []
   )
 
+  const resetting = resetStatus !== null && !resetStatus.startsWith("server reset") && !resetStatus.includes("did not come back")
   const busy =
     phase.p === "starting" ||
     phase.p === "streaming" ||
     phase.p === "disconnected" ||
-    (pipeline.step !== "idle" && pipeline.step !== "failed")
+    (pipeline.step !== "idle" && pipeline.step !== "failed") ||
+    resetting
 
   // POST an opsd-proxied endpoint (real docker build / bundle export, minutes-
   // long). Returns ok + the full response text (gate/tsc errors must survive
@@ -410,7 +414,6 @@ export const CodeScreen = () => {
   }
 
   // Manual refresh — for "am I on the latest bundle?" independent of a run.
-  const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({ busy: false, status: null })
   const onRefresh = async () => {
     if (__DEV__) {
       setOta({ busy: false, status: "dev mode — updates disabled" })
@@ -430,31 +433,71 @@ export const CodeScreen = () => {
     }
   }
 
-  // Demo hard reset: wipe every assistant-built feature + memory on the server
-  // AND reload the app into the pristine embedded bundle. Confirmed natively.
+  // Demo hard reset. The subtlety: app features are baked into the PUBLISHED
+  // bundle, not fetched live — so wiping the server alone leaves the phone
+  // showing the old feature. Full sequence: wipe server (it restarts with an
+  // empty registry) → wait for it back up → publish a fresh EMPTY bundle →
+  // fetch+reload the phone onto it. Confirmed natively.
+  const runReset = async () => {
+    setPipeline({ step: "idle" })
+    setPhase({ p: "idle" })
+    setTranscript([])
+    setResetStatus("wiping server state…")
+    await postOps("/api/system/reset") // server wipes + exits; response may never arrive — ignore
+
+    setResetStatus("waiting for server to restart…")
+    const deadline = Date.now() + 120_000
+    let backUp = false
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(`${BASE_URL}/healthz`, { method: "GET" })
+        if (res.ok) {
+          backUp = true
+          break
+        }
+      } catch {
+        /* still down */
+      }
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+    if (!mountedRef.current) return
+    if (!backUp) {
+      setResetStatus("server did not come back — check the mini")
+      return
+    }
+
+    setResetStatus("rebuilding a clean app bundle…")
+    const publish = await postOps("/api/system/publish-ota")
+    if (!mountedRef.current) return
+    if (!publish.ok) {
+      setResetStatus(`reset done on server, but bundle publish failed: ${publish.text.slice(0, 200)}`)
+      return
+    }
+
+    setResetStatus("reloading to a clean slate…")
+    if (__DEV__) {
+      setResetStatus("server reset; dev mode — reload the app manually")
+      return
+    }
+    try {
+      const check = await Updates.checkForUpdateAsync()
+      if (check.isAvailable) {
+        await Updates.fetchUpdateAsync()
+        await Updates.reloadAsync() // app reloads clean; nothing after runs
+      } else if (mountedRef.current) {
+        setResetStatus("server reset; tap Refresh to pull the clean bundle")
+      }
+    } catch (e) {
+      if (mountedRef.current) setResetStatus(`server reset; reload failed: ${String(e)}`)
+    }
+  }
   const onReset = () => {
     Alert.alert(
       "Reset everything?",
-      "Deletes every feature the assistant has built (server userspace, vault, history) and reloads the app to a clean slate. Cannot be undone.",
+      "Deletes every feature the assistant has built (server userspace, vault, history), rebuilds a clean app, and reloads. Takes a minute. Cannot be undone.",
       [
         { text: "Cancel", style: "cancel" },
-        {
-          text: "Reset",
-          style: "destructive",
-          onPress: () => {
-            void (async () => {
-              setPipeline({ step: "idle" })
-              setPhase({ p: "idle" })
-              setTranscript([])
-              await postOps("/api/system/reset") // server wipes + restarts; response may never arrive
-              try {
-                if (!__DEV__) await Updates.reloadAsync()
-              } catch {
-                /* reload best-effort; server is already resetting */
-              }
-            })()
-          }
-        }
+        { text: "Reset", style: "destructive", onPress: () => void runReset() }
       ]
     )
   }
@@ -563,8 +606,8 @@ export const CodeScreen = () => {
         {ota.status !== null && <Caption>{ota.status}</Caption>}
 
         <Spacer size={24} />
-        <Button title="Reset everything" variant="danger" onPress={onReset} disabled={busy} />
-        <Caption>wipes all assistant-built state (server + app) — demo reset</Caption>
+        <Button title={resetting ? "resetting…" : "Reset everything"} variant="danger" onPress={onReset} disabled={busy} loading={resetting} />
+        {resetStatus !== null ? <Caption>{resetStatus}</Caption> : <Caption>wipes all assistant-built state (server + app) — demo reset</Caption>}
         <Spacer size={40} />
       </ScrollView>
     </Screen>

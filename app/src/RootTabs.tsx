@@ -3,8 +3,9 @@ import { PiProxy } from "@assistant/capabilities-ui/pi"
 import { Ionicons } from "@expo/vector-icons"
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
 import { Effect } from "effect"
+import * as Updates from "expo-updates"
 import { useState, type ComponentType } from "react"
-import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native"
+import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native"
 import { CodeScreen } from "./CodeScreen"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { apiPost, PiProxyLive } from "./PiProxy"
@@ -92,6 +93,26 @@ const userFeatures: ReadonlyArray<Feature> = userspaceApp.flatMap((entry) => {
 // overflow the tab bar. Per-feature ErrorBoundary still isolates a bad one.
 const AppsScreen = () => {
   const [selected, setSelected] = useState<number | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+
+  // The list is baked into the running bundle — so "refresh" means pull the
+  // latest published bundle (a just-built app, or a reset's clean bundle) and
+  // reload onto it. No new bundle → just stop the spinner.
+  const onPullRefresh = async () => {
+    setRefreshing(true)
+    try {
+      if (__DEV__) return
+      const check = await Updates.checkForUpdateAsync()
+      if (check.isAvailable) {
+        await Updates.fetchUpdateAsync()
+        await Updates.reloadAsync() // reloads; nothing after runs
+      }
+    } catch {
+      /* transient — leave the current list, user can pull again */
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   if (selected !== null && userFeatures[selected] !== undefined) {
     const feature = userFeatures[selected]
@@ -111,13 +132,17 @@ const AppsScreen = () => {
   }
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={{ paddingVertical: 8 }}>
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={userFeatures.length === 0 ? { flexGrow: 1 } : { paddingVertical: 8 }}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void onPullRefresh()} />}
+    >
       {userFeatures.length === 0 ? (
         <View style={{ alignItems: "center", paddingTop: 48, gap: 8 }}>
           <Ionicons name="sparkles-outline" size={40} color="#bbb" />
           <Text style={{ fontWeight: "700", fontSize: 16 }}>No apps yet</Text>
           <Text style={{ color: "#666", textAlign: "center", paddingHorizontal: 24 }}>
-            Go to the Code tab and describe an app you want. It’ll appear here once it’s built.
+            Go to the Code tab and describe an app you want. It’ll appear here once it’s built. Pull down to refresh.
           </Text>
         </View>
       ) : (
