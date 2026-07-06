@@ -1,125 +1,71 @@
 import { Body, Button, Caption, Screen, Spacer, TextField, Title } from "@assistant/capabilities-ui/kit"
-import { Effect } from "effect"
+import type { StepName, StepStatus, Task, TaskResult } from "@assistant/platform-api/tasks"
 import * as Updates from "expo-updates"
 import { useEffect, useRef, useState } from "react"
-import { Alert, AppState, ScrollView, StyleSheet, Text, View } from "react-native"
-import { API_TOKEN, apiRequest, BASE_URL } from "./PiProxy"
+import { Alert, AppState, ScrollView, StyleSheet, View } from "react-native"
+import { API_TOKEN, BASE_URL } from "./PiProxy"
 import { connectSse, type SseFrame } from "./sse"
+import { decodeTaskFrame, fetchTask, fetchTasks, startTask } from "./tasks"
 
-// Code tab: prompt -> POST /api/system/code ({runId}, near-instant) -> live
-// SSE at GET /api/system/code/:runId/stream -> GET /api/system/code/:runId as
-// the reconnect backstop (screen lock / SSE drop). Wire format below matches
-// server/src/coding-runs.ts as landed (read directly, not guessed): every SSE
-// frame is a bare `data: <json>\n\n` with NO `event:` line — the discriminator
-// is the JSON payload's own `.type` field (`token`/`tool`/`done`/`error`),
-// and GET status uses `status: "running"|"done"|"failed"` (note: "failed",
-// not "error") with the result nested under `.result`. Unknown/future
-// `.type` values are ignored rather than crashing.
-// The server BUFFERS every event per run and REPLAYS the full history on each
-// stream connect — so reconnecting rebuilds the transcript from scratch
-// (clear-then-replay, never append), and `: hb` comment frames every 15s keep
-// the staleness watchdog fed through quiet spells.
-
-interface CodeResult {
-  readonly text: string
-  readonly model: string
-  readonly commit?: string
-}
-
-type StartResult =
-  | { readonly kind: "accepted"; readonly runId: string }
-  | { readonly kind: "busy" }
-  | { readonly kind: "unauthorized" }
-  | { readonly kind: "error"; readonly message: string }
-
-const startRun = (prompt: string): Promise<StartResult> =>
-  Effect.runPromise(
-    apiRequest("POST", "/api/system/code", { prompt }).pipe(
-      Effect.map(({ status, json }): StartResult => {
-        if (status === 401) return { kind: "unauthorized" }
-        if (status === 409) return { kind: "busy" }
-        if (status >= 200 && status < 300 && typeof json?.runId === "string") {
-          return { kind: "accepted", runId: json.runId }
-        }
-        return { kind: "error", message: json?.error ?? `unexpected response (HTTP ${status})` }
-      }),
-      Effect.catchAll((e) => Effect.succeed({ kind: "error", message: e.message } as StartResult))
-    )
-  )
-
-type StatusResult =
-  | { readonly kind: "running" }
-  | { readonly kind: "done"; readonly result: CodeResult }
-  | { readonly kind: "error"; readonly message: string }
-  | { readonly kind: "unauthorized" }
-  | { readonly kind: "not-found" }
-
-const fetchStatus = (runId: string): Promise<StatusResult> =>
-  Effect.runPromise(
-    apiRequest("GET", `/api/system/code/${encodeURIComponent(runId)}`).pipe(
-      Effect.map(({ status, json }): StatusResult => {
-        if (status === 401) return { kind: "unauthorized" }
-        if (status === 404) return { kind: "not-found" }
-        if (status >= 400) return { kind: "error", message: json?.error ?? `HTTP ${status}` }
-        if (json?.status === "failed") return { kind: "error", message: json?.error ?? "run failed" }
-        if (json?.status === "done") {
-          const result = json?.result ?? {}
-          return { kind: "done", result: { text: result.text ?? "", model: result.model ?? "?", commit: result.commit } }
-        }
-        return { kind: "running" }
-      }),
-      Effect.catchAll((e) => Effect.succeed({ kind: "error", message: e.message } as StatusResult))
-    )
-  )
-
-type TranscriptLine = { readonly id: number; readonly kind: "text" | "tool"; readonly text: string }
+// Code tab: prompt -> POST /api/tasks ({taskId}, near-instant) -> the ENTIRE
+// pipeline (agent -> OTA publish -> server reload) runs server-side and is
+// persisted per-step in the appspace db. This screen is a VIEWER, not an
+// orchestrator: close the app mid-run and the feature still ships; foreground
+// later and we re-attach to (or replay) the task by id. Live view is SSE at
+// GET /api/tasks/:id/stream (Schema-decoded frames; server replays the full
+// buffer on connect, so reconnects rebuild the transcript whole — clear-then-
+// replay, never append), with GET /api/tasks/:id as the durable backstop that
+// works across pod restarts. `: hb` comments every 15s feed the staleness
+// watchdog through quiet spells.
 
 type Phase =
   | { readonly p: "idle" }
   | { readonly p: "starting" }
   | { readonly p: "busy" }
   | { readonly p: "unauthorized" }
-  | { readonly p: "streaming"; readonly runId: string }
-  | { readonly p: "disconnected"; readonly runId: string }
-  | { readonly p: "lost"; readonly runId: string }
-  | { readonly p: "done"; readonly runId: string; readonly result: CodeResult }
-  | { readonly p: "error"; readonly runId: string | null; readonly message: string }
+  | { readonly p: "streaming"; readonly taskId: string }
+  | { readonly p: "disconnected"; readonly taskId: string }
+  | { readonly p: "lost"; readonly taskId: string }
+  | { readonly p: "done"; readonly taskId: string; readonly result: TaskResult | undefined }
+  | { readonly p: "error"; readonly taskId: string | null; readonly message: string }
+
+type TranscriptLine = { readonly id: number; readonly kind: "text" | "tool"; readonly text: string }
+
+type Steps = Readonly<Record<StepName, { readonly status: StepStatus; readonly detail?: string }>>
+
+const IDLE_STEPS: Steps = {
+  agent: { status: "pending" },
+  publish: { status: "pending" },
+  reload: { status: "pending" }
+}
 
 const RECONCILE_POLL_MS = 5000
 // Watchdog for a silently-stalled SSE connection (carrier NAT/middlebox drops
 // the socket with no RST — XHR never fires onerror/onreadystatechange again).
-// The server sends a `: hb` comment every 15s, so a healthy-but-quiet stream
-// (long tool execution, model thinking) still shows BYTE activity (fed via
-// onActivity, not onEvent) — 60s of true byte silence means the connection is
-// genuinely dead, not merely idle.
 const STREAM_STALL_MS = 60000
 const STALL_CHECK_MS = 5000
 // Minimum gap between SSE reconnect attempts — beyond it, degrade to polling.
 const RECONNECT_MIN_GAP_MS = 5000
 
-// After a coding run finishes, the whole ship-it pipeline runs automatically:
-// deploy the new server routes (through the type gate), publish the app bundle,
-// then reload into it — no buttons, just churn until the feature is live.
-type Pipeline =
-  | { readonly step: "idle" }
-  | { readonly step: "deploying" }
-  | { readonly step: "publishing" }
-  | { readonly step: "reloading" }
-  | { readonly step: "failed"; readonly at: string; readonly output: string }
+const STEP_LABEL: Record<StepName, string> = {
+  agent: "① writing code",
+  publish: "② publishing app bundle",
+  reload: "③ restarting server"
+}
 
 export const CodeScreen = () => {
   const [prompt, setPrompt] = useState("")
   const [phase, setPhase] = useState<Phase>({ p: "idle" })
   const [transcript, setTranscript] = useState<ReadonlyArray<TranscriptLine>>([])
-  const [pipeline, setPipeline] = useState<Pipeline>({ step: "idle" })
+  const [steps, setSteps] = useState<Steps>(IDLE_STEPS)
   const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({ busy: false, status: null })
   const [resetStatus, setResetStatus] = useState<string | null>(null)
   const [resetting, setResetting] = useState(false)
 
   const mountedRef = useRef(true)
-  const runIdRef = useRef<string | null>(null)
-  const terminalRef = useRef(true) // no run in flight yet — AppState reconnect must no-op
-  const pipelineRunIdRef = useRef<string | null>(null) // which run already kicked off the ship-it pipeline (fire once)
+  const taskIdRef = useRef<string | null>(null)
+  const terminalRef = useRef(true) // no task tracked yet — AppState reconnect must no-op
+  const appliedTaskRef = useRef<string | null>(null) // which succeeded task already triggered the OTA apply (fire once)
   const sseRef = useRef<ReturnType<typeof connectSse> | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -158,63 +104,109 @@ export const CodeScreen = () => {
     })
   }
 
-  // Reconnect backstop: GET plain status by runId. Used on SSE drop and on
-  // app-focus. While the run is still going: if the SSE stream is alive this
-  // is a no-op (never downgrade a healthy stream to "disconnected"); if the
-  // stream is dead, try to RECONNECT it (the server replays the full event
-  // buffer, so the transcript is rebuilt whole), throttled so a hard-down
-  // server degrades to slow polling instead of a reconnect storm.
-  const reconcile = async (runId: string) => {
-    const status = await fetchStatus(runId)
-    if (!mountedRef.current || runIdRef.current !== runId) return
-    if (status.kind === "done") {
+  const stepsOf = (task: Task): Steps => {
+    const next = { ...IDLE_STEPS } as Record<StepName, { status: StepStatus; detail?: string }>
+    for (const s of task.steps) next[s.name] = { status: s.status, ...(s.detail !== undefined ? { detail: s.detail } : {}) }
+    return next
+  }
+
+  // The task succeeded server-side: the new bundle is already published, so
+  // the only device action left is APPLYING it — check/fetch/reload. This is
+  // "check for updates on a signal", not sequencing: skipping it entirely
+  // (phone in a drawer) is fine, the foreground sync in App.tsx catches up.
+  const applyUpdate = async (taskId: string) => {
+    if (appliedTaskRef.current === taskId) return
+    appliedTaskRef.current = taskId
+    if (__DEV__) {
+      setOta({ busy: false, status: "shipped — dev mode, reload manually" })
+      return
+    }
+    setOta({ busy: true, status: "pulling the new bundle…" })
+    try {
+      const check = await Updates.checkForUpdateAsync()
+      if (check.isAvailable) {
+        await Updates.fetchUpdateAsync()
+        await Updates.reloadAsync() // app reloads into the new feature; nothing after runs
+      } else if (mountedRef.current) {
+        setOta({ busy: false, status: "shipped — bundle not offered yet, tap Refresh in a moment" })
+      }
+    } catch (e) {
+      if (mountedRef.current) setOta({ busy: false, status: `shipped, but reload failed: ${String(e)}` })
+    }
+  }
+
+  const settle = (task: Task) => {
+    terminalRef.current = true
+    stopPolling()
+    stopWatchdog()
+    closeSse()
+    setSteps(stepsOf(task))
+    if (task.status === "succeeded") {
+      setPhase({ p: "done", taskId: task.id, result: task.result })
+      void applyUpdate(task.id)
+    } else {
+      const message =
+        task.status === "interrupted" ? (task.error ?? "server restarted mid-task") : (task.error ?? "task failed")
+      setPhase({ p: "error", taskId: task.id, message })
+    }
+  }
+
+  // Reconnect backstop: GET the durable task row. Used on SSE drop, on
+  // app-focus, and after pod restarts (the row outlives the process that
+  // streamed it). While running: a healthy stream makes this a no-op; a dead
+  // one is reconnected (full replay), throttled so a hard-down server
+  // degrades to slow polling instead of a reconnect storm.
+  const reconcile = async (taskId: string) => {
+    const fetched = await fetchTask(taskId)
+    if (!mountedRef.current || taskIdRef.current !== taskId) return
+    if (fetched.kind === "found" && fetched.task.status !== "running") {
+      settle(fetched.task)
+    } else if (fetched.kind === "not-found") {
       terminalRef.current = true
       stopPolling()
-      setPhase({ p: "done", runId, result: status.result })
-      void runPipeline(runId)
-    } else if (status.kind === "error") {
-      terminalRef.current = true
-      stopPolling()
-      setPhase({ p: "error", runId, message: status.message })
-    } else if (status.kind === "not-found") {
-      terminalRef.current = true
-      stopPolling()
-      setPhase({ p: "lost", runId })
-    } else if (status.kind === "unauthorized") {
+      setPhase({ p: "lost", taskId })
+    } else if (fetched.kind === "unauthorized") {
       terminalRef.current = true
       stopPolling()
       setPhase({ p: "unauthorized" })
+    } else if (fetched.kind === "error") {
+      // transport trouble — keep the poll alive, the task itself is fine
+      if (pollRef.current === null) {
+        pollRef.current = setInterval(() => void reconcile(taskId), RECONCILE_POLL_MS)
+      }
     } else if (sseRef.current !== null) {
-      // still running AND the stream is alive — nothing to fix.
-      return
+      // still running AND the stream is alive — refresh steps, nothing to fix
+      setSteps(stepsOf(fetched.task))
     } else if (Date.now() - lastReconnectRef.current > RECONNECT_MIN_GAP_MS) {
       lastReconnectRef.current = Date.now()
       stopPolling()
+      setSteps(stepsOf(fetched.task))
       setTranscript([]) // server replays the full buffer — rebuild, don't append
-      setPhase({ p: "streaming", runId })
-      startStream(runId)
+      setPhase({ p: "streaming", taskId })
+      startStream(taskId)
     } else {
-      setPhase({ p: "disconnected", runId })
+      setSteps(stepsOf(fetched.task))
+      setPhase({ p: "disconnected", taskId })
       if (pollRef.current === null) {
-        pollRef.current = setInterval(() => void reconcile(runId), RECONCILE_POLL_MS)
+        pollRef.current = setInterval(() => void reconcile(taskId), RECONCILE_POLL_MS)
       }
     }
   }
 
-  const startStream = (runId: string) => {
+  const startStream = (taskId: string) => {
     lastActivityRef.current = Date.now()
     stopWatchdog()
     watchdogRef.current = setInterval(() => {
       if (terminalRef.current) return
       if (Date.now() - lastActivityRef.current < STREAM_STALL_MS) return
-      // no bytes for STREAM_STALL_MS: connection is silently dead (no error,
-      // no close event ever fired) — fall back to the GET-status backstop.
+      // no bytes for STREAM_STALL_MS: connection is silently dead — fall back
+      // to the durable-row backstop.
       closeSse()
       stopWatchdog()
-      void reconcile(runId)
+      void reconcile(taskId)
     }, STALL_CHECK_MS)
     const handle = connectSse(
-      `${BASE_URL}/api/system/code/${encodeURIComponent(runId)}/stream`,
+      `${BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/stream`,
       { authorization: `Bearer ${API_TOKEN}` },
       {
         // Heartbeat comments (`: hb`) never reach onEvent — feed the watchdog
@@ -222,52 +214,37 @@ export const CodeScreen = () => {
         onActivity: () => {
           lastActivityRef.current = Date.now()
         },
-        onEvent: (frame: SseFrame) => {
+        onEvent: (sse: SseFrame) => {
           stopPolling() // a live event proves the stream is healthy — drop any parallel poll
-          // No `event:` line is ever sent (bare `data: <json>` frames) — the
-          // discriminator lives in the JSON payload's own `.type` field.
-          let data: any
-          try {
-            data = JSON.parse(frame.data)
-          } catch {
-            return
-          }
-          switch (data?.type) {
+          const frame = decodeTaskFrame(sse.data) // unknown/future shapes decode to undefined: ignored
+          if (frame === undefined) return
+          switch (frame.type) {
             case "token": {
-              if (typeof data.text === "string" && data.text.length > 0) appendLine("text", data.text)
+              if (frame.text.length > 0) appendLine("text", frame.text)
               break
             }
             case "tool": {
-              const name = typeof data.toolName === "string" ? data.toolName : "tool"
-              const mark = data.phase === "start" ? "▸" : data.phase === "update" ? "…" : data.error === true ? "✗" : "✓"
-              appendLine("tool", `${mark} ${name}`)
+              const mark = frame.phase === "start" ? "▸" : frame.phase === "update" ? "…" : frame.error === true ? "✗" : "✓"
+              appendLine("tool", `${mark} ${frame.toolName}`)
               break
             }
-            case "done": {
+            case "step": {
+              setSteps((prev) => ({
+                ...prev,
+                [frame.name]: { status: frame.status, ...(frame.detail !== undefined ? { detail: frame.detail } : {}) }
+              }))
+              break
+            }
+            case "task": {
+              // terminal — settle from the durable row (single source of
+              // truth: it carries the full step list, persisted before this
+              // frame was emitted)
               terminalRef.current = true
-              stopPolling()
               stopWatchdog()
               closeSse()
-              const result = data.result ?? {}
-              setPhase({
-                p: "done",
-                runId,
-                result: { text: result.text ?? "", model: result.model ?? "?", commit: result.commit ?? undefined }
-              })
-              void runPipeline(runId)
+              void reconcile(taskId)
               break
             }
-            case "error": {
-              terminalRef.current = true
-              stopPolling()
-              stopWatchdog()
-              closeSse()
-              setPhase({ p: "error", runId, message: typeof data.message === "string" ? data.message : "run failed" })
-              break
-            }
-            // any future/unknown type: no UI action, don't crash.
-            default:
-              break
           }
         },
         onHttpError: (status: number) => {
@@ -281,28 +258,39 @@ export const CodeScreen = () => {
           }
           if (status === 404) {
             terminalRef.current = true
-            setPhase({ p: "lost", runId })
+            setPhase({ p: "lost", taskId })
             return
           }
-          // Anything else (5xx, proxy hiccup) is a STREAM problem, not a run
-          // problem — the server-side run keeps executing. Fall back to the
-          // status poll instead of declaring the run dead.
-          void reconcile(runId)
+          // Anything else (5xx, proxy hiccup) is a STREAM problem, not a task
+          // problem — the server-side pipeline keeps executing. NOTE this is
+          // routine during the reload step: the pod restarts underneath the
+          // stream. The durable row carries us across.
+          void reconcile(taskId)
         },
         onNetworkError: () => {
           if (terminalRef.current) return
           closeSse()
           stopWatchdog()
-          void reconcile(runId)
+          void reconcile(taskId)
         },
         onClose: () => {
           if (terminalRef.current) return // stream ended because WE saw a terminal event and closed it
           stopWatchdog()
-          void reconcile(runId)
+          void reconcile(taskId)
         }
       }
     )
     sseRef.current = handle
+  }
+
+  const track = (taskId: string, initial?: Task) => {
+    terminalRef.current = false
+    taskIdRef.current = taskId
+    seqRef.current = 0
+    setTranscript([])
+    setSteps(initial !== undefined ? stepsOf(initial) : { ...IDLE_STEPS, agent: { status: "running" } })
+    setPhase({ p: "streaming", taskId })
+    startStream(taskId)
   }
 
   const onSend = async () => {
@@ -313,36 +301,44 @@ export const CodeScreen = () => {
     stopPolling()
     stopWatchdog()
     setPhase({ p: "starting" })
-    const result = await startRun(text)
+    const result = await startTask(text)
     if (!mountedRef.current) return
     if (result.kind === "accepted") {
-      terminalRef.current = false
-      runIdRef.current = result.runId
-      seqRef.current = 0
-      setTranscript([])
       setPrompt("")
-      setPhase({ p: "streaming", runId: result.runId })
-      startStream(result.runId)
+      track(result.taskId)
     } else if (result.kind === "busy") {
       setPhase({ p: "busy" })
     } else if (result.kind === "unauthorized") {
       setPhase({ p: "unauthorized" })
     } else {
-      setPhase({ p: "error", runId: null, message: result.message })
+      setPhase({ p: "error", taskId: null, message: result.message })
     }
   }
 
-  // Reconnect-and-refetch on foreground. No-op when nothing is tracked (idle,
-  // or a run that already reached a terminal state) — never fires a request
-  // just because the app came back to the foreground.
+  // Adopt the newest running task — the pipeline survives app restarts and
+  // OTA reloads (both routine: the reload step itself replaces this very
+  // bundle mid-task), so on mount we re-attach instead of starting blind.
+  const adoptLatest = async () => {
+    const tasks = await fetchTasks()
+    if (!mountedRef.current || tasks === null) return
+    if (taskIdRef.current !== null && !terminalRef.current) return // already tracking
+    const running = tasks.find((t) => t.status === "running")
+    if (running !== undefined) track(running.id, running)
+  }
+
   useEffect(() => {
+    void adoptLatest()
     const sub = AppState.addEventListener("change", (next) => {
       if (next !== "active") return
-      const runId = runIdRef.current
-      if (runId === null || terminalRef.current) return
-      void reconcile(runId)
+      const taskId = taskIdRef.current
+      if (taskId !== null && !terminalRef.current) {
+        void reconcile(taskId)
+      } else {
+        void adoptLatest() // a task started elsewhere (or pre-reload) may be running
+      }
     })
     return () => sub.remove()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(
@@ -355,20 +351,11 @@ export const CodeScreen = () => {
     []
   )
 
-  const busy =
-    phase.p === "starting" ||
-    phase.p === "streaming" ||
-    phase.p === "disconnected" ||
-    (pipeline.step !== "idle" && pipeline.step !== "failed") ||
-    resetting
+  const busy = phase.p === "starting" || phase.p === "streaming" || phase.p === "disconnected" || resetting
 
-  // POST an opsd-proxied endpoint (real docker build / bundle export, minutes-
-  // long). Returns ok + the full response text (gate/tsc errors must survive
-  // to the phone verbatim). Retries a transient gateway blip: a deploy restarts
-  // the pod, so a follow-up publish can momentarily hit Caddy with no upstream
-  // (502/503/504) — that's infra, not a build failure, so retry rather than
-  // surface it. A real gate failure comes back 200-from-opsd with error text
-  // (opsd always answers) or a 4xx, neither of which we retry.
+  // POST an opsd-proxied endpoint — RESET-ONLY now (the prompt pipeline is
+  // fully server-side). Retries transient gateway blips (a reset restarts the
+  // pod, so a follow-up publish can momentarily hit Caddy with no upstream).
   const TRANSIENT = new Set([502, 503, 504])
   const postOps = async (path: string, attempts = 1): Promise<{ ok: boolean; text: string }> => {
     for (let i = 0; i < attempts; i++) {
@@ -396,14 +383,14 @@ export const CodeScreen = () => {
   }
 
   // healthz reports the pod's startedAt — a fresh timestamp proves a restart
-  // actually happened. Used to confirm a reload/reset regardless of whether the
-  // proxied response survived the pod being replaced.
+  // actually happened (reset confirmation).
   const serverStartedAt = async (): Promise<string | null> => {
     try {
       const res = await fetch(`${BASE_URL}/healthz`, { method: "GET" })
       if (!res.ok) return null
-      const j = await res.json()
-      return typeof j?.startedAt === "string" ? j.startedAt : null
+      const j: unknown = await res.json()
+      const startedAt = (j as { startedAt?: unknown })?.startedAt
+      return typeof startedAt === "string" ? startedAt : null
     } catch {
       return null
     }
@@ -418,57 +405,7 @@ export const CodeScreen = () => {
     return false
   }
 
-  // Auto ship-it pipeline: deploy → publish → reload, no buttons. A failing
-  // deploy (type gate) halts before publish and surfaces the errors so the
-  // user re-prompts Pi to fix; nothing broken ever gets published or reloaded.
-  // Fires at most once per run (guarded by pipelineRunIdRef): both the SSE
-  // `done` handler and the reconcile poll can observe completion, but only the
-  // first wins — otherwise two concurrent pipelines race.
-  const runPipeline = async (runId: string) => {
-    if (pipelineRunIdRef.current === runId) return
-    pipelineRunIdRef.current = runId
-
-    setPipeline({ step: "deploying" })
-    // Fast path: userspace-only self-mods just need a pod restart (userspace is
-    // mounted), not a docker rebuild — /reload is seconds, /redeploy is minutes.
-    // The reload restarts the very pod proxying this request, so its 200 may not
-    // come back — confirm success by the pod's startedAt advancing, not the
-    // (possibly dropped) response. The redeploy's own type-gate failure would
-    // instead leave startedAt unchanged AND return error text.
-    const before = await serverStartedAt()
-    const deploy = await postOps("/api/system/reload", 5)
-    const restarted = await waitForRestart(before, 60_000)
-    if (!mountedRef.current) return
-    if (!deploy.ok && !restarted) {
-      setPipeline({ step: "failed", at: "deploy", output: deploy.text })
-      return
-    }
-    setPipeline({ step: "publishing" })
-    const publish = await postOps("/api/system/publish-ota", 5) // ride out the post-deploy pod rollover
-    if (!mountedRef.current) return
-    if (!publish.ok) {
-      setPipeline({ step: "failed", at: "publish", output: publish.text })
-      return
-    }
-    setPipeline({ step: "reloading" })
-    if (__DEV__) {
-      setPipeline({ step: "failed", at: "reload", output: "dev mode — OTA reload disabled" })
-      return
-    }
-    try {
-      const check = await Updates.checkForUpdateAsync()
-      if (check.isAvailable) {
-        await Updates.fetchUpdateAsync()
-        await Updates.reloadAsync() // app reloads into the new feature; nothing after runs
-      } else if (mountedRef.current) {
-        setPipeline({ step: "failed", at: "reload", output: "published, but no new update offered yet — try refresh" })
-      }
-    } catch (e) {
-      if (mountedRef.current) setPipeline({ step: "failed", at: "reload", output: `reload failed: ${String(e)}` })
-    }
-  }
-
-  // Manual refresh — for "am I on the latest bundle?" independent of a run.
+  // Manual refresh — for "am I on the latest bundle?" independent of a task.
   const onRefresh = async () => {
     if (__DEV__) {
       setOta({ busy: false, status: "dev mode — updates disabled" })
@@ -488,20 +425,19 @@ export const CodeScreen = () => {
     }
   }
 
-  // Demo hard reset. The subtlety: app features are baked into the PUBLISHED
-  // bundle, not fetched live — so wiping the server alone leaves the phone
-  // showing the old feature. Full sequence: wipe server (it restarts with an
-  // empty registry) → wait for it back up → publish a fresh EMPTY bundle →
-  // fetch+reload the phone onto it. Confirmed natively.
+  // Demo hard reset. App features are baked into the PUBLISHED bundle, not
+  // fetched live — so wiping the server alone leaves the phone showing the old
+  // feature. Full sequence: wipe server → wait for it back → publish a fresh
+  // EMPTY bundle → fetch+reload onto it. Deliberately still device-driven:
+  // it's a manual, watched, destructive action — not pipeline sequencing.
   const runReset = async () => {
-    // `resetting` is an explicit flag (NOT derived from the status string) so a
-    // terminal error message can never leave the UI wedged busy forever. Every
-    // exit path clears it in the finally.
     setResetting(true)
     try {
-      setPipeline({ step: "idle" })
       setPhase({ p: "idle" })
+      setSteps(IDLE_STEPS)
       setTranscript([])
+      taskIdRef.current = null
+      terminalRef.current = true
       setResetStatus("wiping server state…")
       const before = await serverStartedAt()
       await postOps("/api/system/reset") // server wipes + exits; response may never arrive — ignore
@@ -551,6 +487,8 @@ export const CodeScreen = () => {
     )
   }
 
+  const pipelineActive = Object.values(steps).some((s) => s.status !== "pending") && phase.p !== "idle"
+
   return (
     <Screen>
       <ScrollView
@@ -569,7 +507,7 @@ export const CodeScreen = () => {
         }}
       >
         <Title>Code</Title>
-        <Caption>self-mod coder — writes userspace, auto-commits</Caption>
+        <Caption>self-mod coder — the server ships it even if you close the app</Caption>
         <Spacer />
         <TextField label="Prompt" value={prompt} onChangeText={setPrompt} placeholder="what should Pi change?" />
         <Spacer size={8} />
@@ -590,19 +528,37 @@ export const CodeScreen = () => {
         {phase.p === "lost" && (
           <>
             <Spacer size={8} />
-            <Body>run lost (server may have restarted). Start a new prompt.</Body>
+            <Body>task not found on the server. Start a new prompt.</Body>
           </>
         )}
         {(phase.p === "streaming" || phase.p === "disconnected") && (
           <>
             <Spacer size={8} />
-            <Caption>{phase.p === "streaming" ? `running (run ${phase.runId.slice(0, 8)}…)` : "connection lost — reconnecting…"}</Caption>
+            <Caption>
+              {phase.p === "streaming"
+                ? `running (task ${phase.taskId.slice(0, 8)}…) — safe to close the app`
+                : "connection lost — the server keeps going; reconnecting…"}
+            </Caption>
           </>
         )}
         {phase.p === "error" && (
           <>
             <Spacer size={8} />
             <Body>error: {phase.message}</Body>
+          </>
+        )}
+
+        {/* Server-side pipeline, rendered from step frames / the durable row. */}
+        {pipelineActive && (
+          <>
+            <Spacer size={8} />
+            {(Object.entries(steps) as ReadonlyArray<[StepName, Steps[StepName]]>).map(([name, s]) => (
+              <Caption key={name}>
+                {STEP_LABEL[name]}:{" "}
+                {s.status === "running" ? "…" : s.status}
+                {s.status === "failed" && s.detail !== undefined ? ` — ${s.detail.slice(0, 400)}` : ""}
+              </Caption>
+            ))}
           </>
         )}
 
@@ -621,41 +577,16 @@ export const CodeScreen = () => {
           <>
             <Spacer />
             <Caption>
-              wrote code · {phase.result.model}
-              {phase.result.commit !== undefined ? ` · ${phase.result.commit}` : ""}
+              wrote code{phase.result !== undefined ? ` · ${phase.result.model}` : ""}
+              {phase.result?.commit !== undefined ? ` · ${phase.result.commit}` : ""}
             </Caption>
-            <Body>{phase.result.text}</Body>
-          </>
-        )}
-
-        {/* Auto ship-it pipeline — churns after the run with no buttons. */}
-        {(pipeline.step === "deploying" || pipeline.step === "publishing" || pipeline.step === "reloading") && (
-          <>
-            <Spacer />
-            <Caption>
-              {pipeline.step === "deploying"
-                ? "① restarting server with your new routes…"
-                : pipeline.step === "publishing"
-                  ? "② publishing app bundle (~30s)…"
-                  : "③ reloading into your new feature…"}
-            </Caption>
-          </>
-        )}
-        {pipeline.step === "failed" && (
-          <>
-            <Spacer />
-            <Caption>pipeline halted at {pipeline.at} — nothing broken was shipped. Fix by re-prompting above.</Caption>
-            <ScrollView style={styles.logBox} nestedScrollEnabled>
-              <Text selectable style={styles.logText}>
-                {pipeline.output}
-              </Text>
-            </ScrollView>
+            {phase.result !== undefined && <Body>{phase.result.text}</Body>}
           </>
         )}
 
         <Spacer size={28} />
         {/* Shows the RUNNING bundle's identity so "am I on the latest?" is
-            answerable at a glance; manual refresh independent of a run. */}
+            answerable at a glance; manual refresh independent of a task. */}
         <Caption>
           bundle: {__DEV__ ? "dev" : `${Updates.updateId?.slice(0, 8) ?? "embedded"} · ${Updates.createdAt?.toISOString?.() ?? "APK build"}`}
         </Caption>
@@ -674,9 +605,5 @@ export const CodeScreen = () => {
 
 const styles = StyleSheet.create({
   page: { flex: 1 },
-  transcript: { gap: 4 },
-  row: { flexDirection: "row", gap: 8 },
-  rowItem: { flex: 1 },
-  logBox: { maxHeight: 240, borderWidth: 1, borderColor: "#eee", borderRadius: 6, padding: 8 },
-  logText: { fontSize: 11, fontFamily: "monospace" }
+  transcript: { gap: 4 }
 })
