@@ -50,6 +50,8 @@ spec:
               value: http://host.orb.internal:11434/v1
             - name: APPSPACE_DB
               value: /data/appspace/appspace.db
+            - name: USERSPACE_REMOTE
+              value: /data/appspace/userspace.git # bare repo on the appspace hostPath — survives userspace wipes
           volumeMounts:
             - name: updates
               mountPath: /data/updates

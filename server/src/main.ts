@@ -1,9 +1,9 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { NodeContext, NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { Config, Effect, Layer, Redacted } from "effect"
+import { Config, Effect, Layer, Redacted, Schedule } from "effect"
 import { createServer } from "node:http"
 import { FetchHttpClient } from "@effect/platform"
-import { PiClientLive } from "./code.js"
+import { PiClientLive, vaultSweep } from "./code.js"
 import { SqlLive } from "./db.js"
 import { otaRoutes } from "./ota.js"
 import { systemRoutes } from "./system.js"
@@ -67,13 +67,21 @@ const ServerLive = Layer.unwrapEffect(
 
 // TaskRepo's layer init runs the sqlite migration AND the boot reconciler
 // (tasks orphaned by the previous pod generation) before any route is served.
-const TasksLive = TaskRepoLive.pipe(Layer.provide(SqlLive))
+// provideMerge (not provide): the SqlClient is ALSO exposed to the router —
+// userspace Persistence rides the same connection (see userspace.ts).
+const DataLive = Layer.provideMerge(TaskRepoLive, SqlLive)
+
+// vault sweep: commit-and-push userspace file changes made outside coding
+// runs (chat memories, feature-runtime vault writes) — see code.ts vaultSweep
+const VaultSweepLive = Layer.effectDiscard(
+  Effect.forkDaemon(vaultSweep.pipe(Effect.repeat(Schedule.spaced("15 minutes"))))
+)
 
 NodeRuntime.runMain(
   Layer.launch(
     Layer.provide(
       app,
-      Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer, PiClientLive, TasksLive)
+      Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer, PiClientLive, DataLive, VaultSweepLive)
     )
   )
 )

@@ -37,6 +37,10 @@ const OllamaBaseUrl = Config.string("OLLAMA_BASE_URL").pipe(
   Config.withDefault("http://host.orb.internal:11434/v1")
 )
 const DefaultCodeModel = Config.string("CODE_MODEL").pipe(Config.withDefault("gpt-5.5"))
+// bare repo the userspace history pushes to after every commit (bootstrap
+// creates it; empty string disables). Lives on the appspace hostPath so it
+// survives a userspace wipe — the disposability restore source.
+const UserspaceRemote = Config.string("USERSPACE_REMOTE").pipe(Config.withDefault(""))
 
 const RUN_TIMEOUT_MS = 15 * 60 * 1000
 
@@ -365,10 +369,16 @@ export const PiClientLive = Layer.effect(
  */
 export const resetAllState = Effect.gen(function* () {
   const root = yield* UserspaceDir
+  const remote = yield* UserspaceRemote
   yield* Effect.tryPromise({
     try: async () => {
       for (const entry of await fs.readdir(root)) {
         await fs.rm(path.join(root, entry), { recursive: true, force: true })
+      }
+      // the bare remote must die too — otherwise the next boot's bootstrap
+      // faithfully restores everything we just erased (reset would no-op)
+      if (remote !== "") {
+        await fs.rm(remote, { recursive: true, force: true }).catch(() => {})
       }
       await fs.rm(piSessionDir(), { recursive: true, force: true }).catch(() => {})
     },
@@ -380,8 +390,9 @@ export const resetAllState = Effect.gen(function* () {
  * A failed run must not leave partial edits in the hot-mounted working tree:
  * they'd be live-served immediately AND silently swept into the next run's
  * `git add -A` commit (review finding 01:15 #2). Stash them (with untracked
- * files; gitignored data/vault are untouched by design) — recoverable via
- * `git stash list` rather than hard-discarded. Returns true if residue existed.
+ * files; vault/ is tracked now so a failed run's vault writes stash with the
+ * rest — recoverable, not lost) — via `git stash list` rather than
+ * hard-discarded. Returns true if residue existed.
  */
 export const stashUserspaceResidue = (label: string) =>
   Effect.gen(function* () {
@@ -417,10 +428,13 @@ export const changedFeatures = (sha: string) =>
     }).pipe(Effect.orElseSucceed(() => [] as Array<string>))
   })
 
-/** Commit whatever the agent changed in the userspace repo. */
+/** Commit whatever the agent changed in the userspace repo, then push to the
+ * bare remote (best-effort: a push failure is logged, never fails the commit —
+ * the local history is still the working truth, the remote is durability). */
 export const commitUserspace = (message: string) =>
   Effect.gen(function* () {
     const root = yield* UserspaceDir
+    const remote = yield* UserspaceRemote
     return yield* Effect.tryPromise({
       try: async () => {
         // pod has no gitconfig — identity inline, not baked into the image
@@ -431,8 +445,27 @@ export const commitUserspace = (message: string) =>
         await git("add", "-A")
         await git("commit", "-m", `self-mod: ${message.slice(0, 72)}`)
         const { stdout: sha } = await git("rev-parse", "--short", "HEAD")
+        if (remote !== "") {
+          await git("push", remote, "HEAD:main").catch((e: unknown) => {
+            console.error(`userspace push to ${remote} failed: ${String(e)}`)
+          })
+        }
         return sha.trim()
       },
       catch: (e) => new PiError({ message: `userspace commit failed: ${String(e)}` })
     })
   })
+
+/** Periodic vault sweep: chat memories / feature-runtime vault writes happen
+ * outside coding runs — commit (and thus push) them on an interval so "all
+ * userspace files live in git" holds without per-write commit spam. Skipped
+ * while the engine is held: a sweep mid-coding-run would commit the agent's
+ * half-written files under a "vault sweep" message. */
+export const vaultSweep = Effect.suspend(() =>
+  engineBusy !== undefined
+    ? Effect.void
+    : commitUserspace("vault sweep").pipe(
+        Effect.asVoid,
+        Effect.catchAll((e) => Effect.logWarning(`vault sweep: ${e.message}`))
+      )
+)

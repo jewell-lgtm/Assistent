@@ -1,6 +1,7 @@
 import { HttpApiBuilder, HttpRouter, HttpServerResponse } from "@effect/platform"
 import { PiClient } from "@assistant/capabilities-server/pi"
 import type { ChatCapability, ServerCapability, UserspaceServices } from "@assistant/capabilities-server/server"
+import { SqlClient } from "@effect/sql"
 import { Cause, Config, Effect, Exit, Layer } from "effect"
 import { persistenceLive } from "./persistence.js"
 import { userspaceServer } from "./userspace.gen.js"
@@ -18,6 +19,7 @@ const UserspaceDir = Config.string("USERSPACE_DIR").pipe(Config.withDefault("/re
 const buildModule = (
   root: string,
   piLayer: Layer.Layer<PiClient>,
+  sqlLayer: Layer.Layer<SqlClient.SqlClient>,
   featureName: string,
   caps: ReadonlyArray<ServerCapability>
 ) =>
@@ -34,7 +36,10 @@ const buildModule = (
       // the feature's own server.ts declares and is not validated, so keying
       // on it would let a feature read/write another feature's store (or
       // mount over another feature's route prefix) just by naming it.
-      const featureLayer: Layer.Layer<UserspaceServices> = Layer.merge(piLayer, persistenceLive(root, featureName))
+      const featureLayer: Layer.Layer<UserspaceServices> = Layer.merge(
+        piLayer,
+        persistenceLive(root, featureName).pipe(Layer.provide(sqlLayer))
+      )
       const prefix = `/api/features/${featureName}` as const
       const app =
         cap.kind === "http"
@@ -71,12 +76,15 @@ const buildModule = (
 export const userspaceRoutes = Effect.gen(function* () {
   const root = yield* UserspaceDir
   const piLayer = Layer.succeed(PiClient, yield* PiClient)
+  // resolve the shared sqlite client ONCE — every feature's Persistence rides
+  // the same connection (and the same appspace db file)
+  const sqlLayer = Layer.succeed(SqlClient.SqlClient, yield* SqlClient.SqlClient)
   const loaded: Array<string> = []
   const failed: Array<{ name: string; error: string }> = []
   let router: AnyRouter = HttpRouter.empty
   for (const entry of userspaceServer) {
     const exit = yield* Effect.tryPromise({ try: () => entry.load(), catch: String }).pipe(
-      Effect.flatMap((caps) => buildModule(root, piLayer, entry.name, caps)),
+      Effect.flatMap((caps) => buildModule(root, piLayer, sqlLayer, entry.name, caps)),
       Effect.exit
     )
     if (Exit.isSuccess(exit)) {

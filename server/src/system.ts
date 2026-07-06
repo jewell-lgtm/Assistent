@@ -8,6 +8,7 @@ import {
 } from "@effect/platform"
 import { PiClient, type PiRunOptions } from "@assistant/capabilities-server/pi"
 import { Task, TaskList, type TaskEvent } from "@assistant/platform-api/tasks"
+import { SqlClient } from "@effect/sql"
 import { Config, Effect, Option, Schema, Stream } from "effect"
 import { Redacted } from "effect"
 import * as path from "node:path"
@@ -237,6 +238,11 @@ const tasksList = Effect.gen(function* () {
 // reconnect lands on a freshly-bootstrapped server.
 const systemReset = Effect.gen(function* () {
   yield* resetAllState
+  // feature KV lives in the appspace db now — "erase everything the assistant
+  // has built or remembered" includes it. Task history stays: platform audit
+  // log, not assistant memory.
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`DELETE FROM kv`.pipe(Effect.ignore)
   yield* Effect.sync(() => {
     setTimeout(() => process.exit(0), 500)
   })

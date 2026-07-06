@@ -1,0 +1,16 @@
+# Litestream config for the appspace sqlite db — continuous WAL replication
+# to the self-hosted MinIO on this same mini. Installed to
+# /usr/local/etc/litestream.yml (or run with `litestream replicate -config`).
+# Secrets come from the environment (see setup-minio-litestream.sh), never
+# from this file.
+dbs:
+  - path: /Users/mattisfrommars/assistant-data/appspace/appspace.db
+    replicas:
+      - type: s3
+        bucket: assistant
+        path: appspace-db
+        endpoint: http://127.0.0.1:9000
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        force-path-style: true
+        retention: 168h # 7 days of point-in-time restore
