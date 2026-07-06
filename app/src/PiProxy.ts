@@ -14,7 +14,7 @@ export const API_TOKEN: string = Constants.expoConfig?.extra?.["apiToken"] ?? ""
 
 export interface ApiResponse {
   readonly status: number
-  readonly json: any
+  readonly json: unknown
 }
 
 /** Same request core, but surfaces the status code instead of throwing on non-2xx —
@@ -28,7 +28,7 @@ const request = (method: "GET" | "POST", apiPath: string, body?: unknown) =>
         headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {})
       })
-      const json: any = await res.json().catch(() => ({}))
+      const json: unknown = await res.json().catch(() => ({}))
       return { status: res.status, json }
     },
     catch: (e) => new PiError({ message: e instanceof Error ? e.message : String(e) })
@@ -37,18 +37,24 @@ const request = (method: "GET" | "POST", apiPath: string, body?: unknown) =>
 export const apiRequest = request
 
 /** POST json to core server, PiError on non-200/network failure. */
-export const apiPost = (apiPath: string, body: unknown) =>
+export const apiPost = (apiPath: string, body: unknown): Effect.Effect<unknown, PiError> =>
   request("POST", apiPath, body).pipe(
-    Effect.flatMap(({ status, json }) =>
-      status >= 200 && status < 300
-        ? Effect.succeed(json)
-        : Effect.fail(new PiError({ message: json.error ?? `HTTP ${status}` }))
-    )
+    Effect.flatMap(({ status, json }) => {
+      if (status >= 200 && status < 300) return Effect.succeed(json)
+      const error = (json as { readonly error?: unknown } | null)?.error
+      return Effect.fail(new PiError({ message: typeof error === "string" ? error : `HTTP ${status}` }))
+    })
   )
 
 export const PiProxyLive = Layer.succeed(PiProxy, {
   run: (options: PiRunOptions) =>
     apiPost("/api/pi/run", options).pipe(
-      Effect.map((json): PiRunResult => ({ text: json.text ?? "", model: json.model ?? "?" }))
+      Effect.map((json): PiRunResult => {
+        const r = json as { readonly text?: unknown; readonly model?: unknown } | null
+        return {
+          text: typeof r?.text === "string" ? r.text : "",
+          model: typeof r?.model === "string" ? r.model : "?"
+        }
+      })
     )
 })

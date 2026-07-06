@@ -16,7 +16,10 @@ import { userspaceApp } from "./userspace.gen"
 const runChat = (message: string) =>
   Effect.runPromise(
     apiPost("/api/chat", { message }).pipe(
-      Effect.map((r: any) => String(r.text ?? "")),
+      Effect.map((r) => {
+        const text = (r as { readonly text?: unknown }).text
+        return typeof text === "string" ? text : ""
+      }),
       Effect.catchAll((e) => Effect.succeed(`error: ${e.message}`))
     )
   )
@@ -160,7 +163,8 @@ const AppsScreen = () => {
   )
 }
 
-type CoreTab = { readonly name: string; readonly title: string; readonly icon: string; readonly Component: ComponentType }
+type IoniconName = keyof typeof Ionicons.glyphMap
+type CoreTab = { readonly name: string; readonly title: string; readonly icon: IoniconName; readonly Component: ComponentType }
 const coreTabs: ReadonlyArray<CoreTab> = [
   { name: "chat", title: "Chat", icon: "chatbubble-ellipses", Component: ChatScreen },
   { name: "code", title: "Code", icon: "code-slash", Component: CodeScreen },
@@ -184,7 +188,7 @@ export const RootTabs = () => (
         name={name}
         options={{
           title,
-          tabBarIcon: ({ color, size }) => <Ionicons name={icon as any} size={size} color={color} />
+          tabBarIcon: ({ color, size }) => <Ionicons name={icon} size={size} color={color} />
         }}
       >
         {() => (

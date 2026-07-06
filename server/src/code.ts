@@ -248,15 +248,19 @@ const chatResourceLoader = async (root: string, onRunaway: () => void) => {
 // resolves fine either way; SessionManager.create() mkdir's it if missing.
 const piSessionDir = () => path.join(getAgentDir(), "sessions")
 
-const lastAssistantText = (messages: ReadonlyArray<any>): string => {
+// The SDK doesn't export its message union at the top level — narrow
+// structurally from unknown instead of trusting a hand-copied shape.
+const lastAssistantText = (messages: ReadonlyArray<unknown>): string => {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
+    const m = messages[i] as { readonly role?: unknown; readonly content?: unknown } | undefined
     if (m?.role !== "assistant") continue
     if (typeof m.content === "string") return m.content
     if (Array.isArray(m.content)) {
-      return m.content
-        .filter((c: any) => c?.type === "text")
-        .map((c: any) => c.text)
+      return (m.content as ReadonlyArray<unknown>)
+        .flatMap((c) => {
+          const part = c as { readonly type?: unknown; readonly text?: unknown } | undefined
+          return part?.type === "text" && typeof part.text === "string" ? [part.text] : []
+        })
         .join("\n")
     }
   }
