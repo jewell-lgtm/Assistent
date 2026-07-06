@@ -59,6 +59,7 @@ interface RunState {
   result?: RunResult | undefined
   error?: string | undefined
   readonly events: Array<CodingRunEvent>
+  truncated: boolean
   readonly listeners: Set<(event: CodingRunEvent) => void>
 }
 
@@ -67,7 +68,14 @@ let activeRunId: string | undefined
 
 const notify = (run: RunState, event: CodingRunEvent) => {
   run.events.push(event)
-  if (run.events.length > MAX_BUFFERED_EVENTS) run.events.shift()
+  // Batch-drop the oldest quarter when over cap, rather than shift() per event:
+  // shift() is O(n) so per-event trimming is O(n²) over a long run. Dropping a
+  // chunk at a time amortizes to O(1). A reconnect then replays only the
+  // surviving tail — flag it so the stream can prepend a truncation notice.
+  if (run.events.length > MAX_BUFFERED_EVENTS) {
+    run.events.splice(0, Math.floor(MAX_BUFFERED_EVENTS / 4))
+    run.truncated = true
+  }
   for (const listener of run.listeners) listener(event)
 }
 
@@ -120,7 +128,7 @@ export const startCodingRun = (
       if (!tryAcquireEngine("coding")) return Effect.fail(new PiError({ message: "busy" }))
 
       const runId = randomUUID()
-      const run: RunState = { runId, status: "running", events: [], listeners: new Set() }
+      const run: RunState = { runId, status: "running", events: [], truncated: false, listeners: new Set() }
       runs.set(runId, run)
       activeRunId = runId
       evictOldIfNeeded()
@@ -212,6 +220,9 @@ export const codingRunEventStream = (runId: string): Stream.Stream<Uint8Array> |
       Effect.sync(() => {
         // Replay + listener-attach happen in one synchronous block, so no
         // event can slip between the snapshot and the subscription.
+        if (run.truncated) {
+          void emit.single(sseChunk({ type: "token", text: "…[earlier output truncated]\n" }))
+        }
         for (const event of run.events) void emit.single(sseChunk(event))
         if (run.status !== "running") {
           void emit.end()

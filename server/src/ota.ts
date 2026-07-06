@@ -61,7 +61,10 @@ const assetUrl = (
 // update never applies. Direct LAN access (no proxy header) stays http.
 const requestOrigin = (req: HttpServerRequest.HttpServerRequest) => {
   const host = req.headers["host"] ?? "localhost"
-  const proto = req.headers["x-forwarded-proto"] ?? "http"
+  // X-Forwarded-Proto can be a comma-separated chain ("https, http") if more
+  // than one proxy appends — take the first (client-facing) scheme, else a
+  // malformed "https,http://host" poisons every asset URL.
+  const proto = (req.headers["x-forwarded-proto"] ?? "http").split(",")[0]!.trim() || "http"
   return `${proto}://${host}`
 }
 

@@ -176,16 +176,6 @@ const codeStatus = Effect.gen(function* () {
 
 // Demo/PoC reset: wipe all assistant-built state, then exit — kubernetes
 // restarts the container and boot rebuilds the skeleton (bootstrap + regen).
-// The delayed exit lets the 200 reply flush first. Deliberately no engine-busy
-// guard: reset is absolute, and the dying process takes any live run with it.
-const resetHandler = Effect.gen(function* () {
-  yield* resetAllState
-  setTimeout(() => process.exit(0), 750)
-  return yield* HttpServerResponse.json({ ok: true, resetting: true })
-}).pipe(
-  Effect.catchTag("PiError", (e) => HttpServerResponse.json({ error: e.message }, { status: 500 }))
-)
-
 // Demo/PoC hard reset: wipe all assistant-built state, respond, then exit so
 // the container restart rebuilds the skeleton from appspace (bootstrap). The
 // process.exit is deferred past the response flush. maxUnavailable:0 means the

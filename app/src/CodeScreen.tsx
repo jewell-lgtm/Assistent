@@ -114,10 +114,12 @@ export const CodeScreen = () => {
   const [pipeline, setPipeline] = useState<Pipeline>({ step: "idle" })
   const [ota, setOta] = useState<{ readonly busy: boolean; readonly status: string | null }>({ busy: false, status: null })
   const [resetStatus, setResetStatus] = useState<string | null>(null)
+  const [resetting, setResetting] = useState(false)
 
   const mountedRef = useRef(true)
   const runIdRef = useRef<string | null>(null)
   const terminalRef = useRef(true) // no run in flight yet — AppState reconnect must no-op
+  const pipelineRunIdRef = useRef<string | null>(null) // which run already kicked off the ship-it pipeline (fire once)
   const sseRef = useRef<ReturnType<typeof connectSse> | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -125,6 +127,7 @@ export const CodeScreen = () => {
   const lastReconnectRef = useRef(0)
   const seqRef = useRef(0)
   const scrollRef = useRef<ScrollView>(null)
+  const atBottomRef = useRef(true)
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -168,7 +171,7 @@ export const CodeScreen = () => {
       terminalRef.current = true
       stopPolling()
       setPhase({ p: "done", runId, result: status.result })
-      void runPipeline()
+      void runPipeline(runId)
     } else if (status.kind === "error") {
       terminalRef.current = true
       stopPolling()
@@ -251,7 +254,7 @@ export const CodeScreen = () => {
                 runId,
                 result: { text: result.text ?? "", model: result.model ?? "?", commit: result.commit ?? undefined }
               })
-              void runPipeline()
+              void runPipeline(runId)
               break
             }
             case "error": {
@@ -352,7 +355,6 @@ export const CodeScreen = () => {
     []
   )
 
-  const resetting = resetStatus !== null && !resetStatus.startsWith("server reset") && !resetStatus.includes("did not come back")
   const busy =
     phase.p === "starting" ||
     phase.p === "streaming" ||
@@ -393,16 +395,51 @@ export const CodeScreen = () => {
     return { ok: false, text: "gave up after retries" }
   }
 
+  // healthz reports the pod's startedAt — a fresh timestamp proves a restart
+  // actually happened. Used to confirm a reload/reset regardless of whether the
+  // proxied response survived the pod being replaced.
+  const serverStartedAt = async (): Promise<string | null> => {
+    try {
+      const res = await fetch(`${BASE_URL}/healthz`, { method: "GET" })
+      if (!res.ok) return null
+      const j = await res.json()
+      return typeof j?.startedAt === "string" ? j.startedAt : null
+    } catch {
+      return null
+    }
+  }
+  const waitForRestart = async (before: string | null, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const now = await serverStartedAt()
+      if (now !== null && now !== before) return true
+      await new Promise((r) => setTimeout(r, 3000))
+    }
+    return false
+  }
+
   // Auto ship-it pipeline: deploy → publish → reload, no buttons. A failing
   // deploy (type gate) halts before publish and surfaces the errors so the
   // user re-prompts Pi to fix; nothing broken ever gets published or reloaded.
-  const runPipeline = async () => {
+  // Fires at most once per run (guarded by pipelineRunIdRef): both the SSE
+  // `done` handler and the reconcile poll can observe completion, but only the
+  // first wins — otherwise two concurrent pipelines race.
+  const runPipeline = async (runId: string) => {
+    if (pipelineRunIdRef.current === runId) return
+    pipelineRunIdRef.current = runId
+
     setPipeline({ step: "deploying" })
     // Fast path: userspace-only self-mods just need a pod restart (userspace is
     // mounted), not a docker rebuild — /reload is seconds, /redeploy is minutes.
+    // The reload restarts the very pod proxying this request, so its 200 may not
+    // come back — confirm success by the pod's startedAt advancing, not the
+    // (possibly dropped) response. The redeploy's own type-gate failure would
+    // instead leave startedAt unchanged AND return error text.
+    const before = await serverStartedAt()
     const deploy = await postOps("/api/system/reload", 5)
+    const restarted = await waitForRestart(before, 60_000)
     if (!mountedRef.current) return
-    if (!deploy.ok) {
+    if (!deploy.ok && !restarted) {
       setPipeline({ step: "failed", at: "deploy", output: deploy.text })
       return
     }
@@ -457,47 +494,39 @@ export const CodeScreen = () => {
   // empty registry) → wait for it back up → publish a fresh EMPTY bundle →
   // fetch+reload the phone onto it. Confirmed natively.
   const runReset = async () => {
-    setPipeline({ step: "idle" })
-    setPhase({ p: "idle" })
-    setTranscript([])
-    setResetStatus("wiping server state…")
-    await postOps("/api/system/reset") // server wipes + exits; response may never arrive — ignore
-
-    setResetStatus("waiting for server to restart…")
-    const deadline = Date.now() + 120_000
-    let backUp = false
-    while (Date.now() < deadline) {
-      try {
-        const res = await fetch(`${BASE_URL}/healthz`, { method: "GET" })
-        if (res.ok) {
-          backUp = true
-          break
-        }
-      } catch {
-        /* still down */
-      }
-      await new Promise((r) => setTimeout(r, 3000))
-    }
-    if (!mountedRef.current) return
-    if (!backUp) {
-      setResetStatus("server did not come back — check the mini")
-      return
-    }
-
-    setResetStatus("rebuilding a clean app bundle…")
-    const publish = await postOps("/api/system/publish-ota", 5)
-    if (!mountedRef.current) return
-    if (!publish.ok) {
-      setResetStatus(`reset done on server, but bundle publish failed: ${publish.text.slice(0, 200)}`)
-      return
-    }
-
-    setResetStatus("reloading to a clean slate…")
-    if (__DEV__) {
-      setResetStatus("server reset; dev mode — reload the app manually")
-      return
-    }
+    // `resetting` is an explicit flag (NOT derived from the status string) so a
+    // terminal error message can never leave the UI wedged busy forever. Every
+    // exit path clears it in the finally.
+    setResetting(true)
     try {
+      setPipeline({ step: "idle" })
+      setPhase({ p: "idle" })
+      setTranscript([])
+      setResetStatus("wiping server state…")
+      const before = await serverStartedAt()
+      await postOps("/api/system/reset") // server wipes + exits; response may never arrive — ignore
+
+      setResetStatus("waiting for server to restart…")
+      const backUp = await waitForRestart(before, 120_000)
+      if (!mountedRef.current) return
+      if (!backUp) {
+        setResetStatus("server did not come back — check the mini, then try again")
+        return
+      }
+
+      setResetStatus("rebuilding a clean app bundle…")
+      const publish = await postOps("/api/system/publish-ota", 5)
+      if (!mountedRef.current) return
+      if (!publish.ok) {
+        setResetStatus(`server was reset, but the bundle publish failed — tap Reset again or Refresh: ${publish.text.slice(0, 160)}`)
+        return
+      }
+
+      setResetStatus("reloading to a clean slate…")
+      if (__DEV__) {
+        setResetStatus("server reset; dev mode — reload the app manually")
+        return
+      }
       const check = await Updates.checkForUpdateAsync()
       if (check.isAvailable) {
         await Updates.fetchUpdateAsync()
@@ -506,7 +535,9 @@ export const CodeScreen = () => {
         setResetStatus("server reset; tap Refresh to pull the clean bundle")
       }
     } catch (e) {
-      if (mountedRef.current) setResetStatus(`server reset; reload failed: ${String(e)}`)
+      if (mountedRef.current) setResetStatus(`reset error: ${String(e)}`)
+    } finally {
+      if (mountedRef.current) setResetting(false)
     }
   }
   const onReset = () => {
@@ -526,7 +557,16 @@ export const CodeScreen = () => {
         ref={scrollRef}
         style={styles.page}
         keyboardShouldPersistTaps="handled"
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        onScroll={(e) => {
+          // track whether the user is pinned to the bottom; if they've scrolled
+          // up to read, stop auto-scrolling and stop fighting them.
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent
+          atBottomRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - 40
+        }}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (atBottomRef.current) scrollRef.current?.scrollToEnd({ animated: true })
+        }}
       >
         <Title>Code</Title>
         <Caption>self-mod coder — writes userspace, auto-commits</Caption>

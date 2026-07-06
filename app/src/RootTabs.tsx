@@ -147,7 +147,9 @@ const AppsScreen = () => {
         </View>
       ) : (
         userFeatures.map((feature, i) => (
-          <TouchableOpacity key={feature.name} style={styles.listRow} onPress={() => setSelected(i)}>
+          // key by index, not name: two generated features could collide on a
+          // name, and a duplicate React key would silently drop one from the list.
+          <TouchableOpacity key={i} style={styles.listRow} onPress={() => setSelected(i)}>
             <Ionicons name="cube-outline" size={22} color="#0a7" />
             <Text style={styles.listTitle}>{feature.title}</Text>
             <Ionicons name="chevron-forward" size={18} color="#bbb" />

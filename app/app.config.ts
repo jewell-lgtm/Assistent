@@ -33,9 +33,10 @@ const config: ExpoConfig = {
     requestHeaders: {
       authorization: `Bearer ${apiToken}`
     },
-    // allow the runtime setUpdateURLAndRequestHeadersOverride() in App.tsx to
-    // repoint the *installed* APK's OTA check (baked with the old LAN URL) at
-    // the public https URL without a reinstall.
+    // permits a future runtime Updates.setUpdateURLAndRequestHeadersOverride()
+    // to repoint an installed APK's OTA check (e.g. if the domain or token
+    // changes) without a reinstall. Not currently exercised — the baked url
+    // above is already correct — but kept so a URL/token change stays OTA-able.
     disableAntiBrickingMeasures: true
   },
   plugins: [
