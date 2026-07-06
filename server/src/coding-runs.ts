@@ -2,7 +2,8 @@ import { PiError, type PiRunOptions } from "@assistant/capabilities-server/pi"
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent"
 import { Effect, Stream } from "effect"
 import { randomUUID } from "node:crypto"
-import { commitUserspace, releaseEngine, runPi, stashUserspaceResidue, tryAcquireEngine } from "./code.js"
+import { changedFeatures, commitUserspace, releaseEngine, runPi, stashUserspaceResidue, tryAcquireEngine } from "./code.js"
+import { journal, upsertAppPage } from "./vault.js"
 
 // Async coding-run tracking for the phone Code tab: POST accepts and returns
 // immediately, the Pi session + userspace commit run in a background daemon
@@ -135,6 +136,13 @@ export const startCodingRun = (
           catch: (e) => new PiError({ message: String(e) })
         })
         const commit = yield* commitUserspace(options.prompt)
+        // Vault: journal the build and give each touched app a page. Best-effort
+        // (vault helpers swallow their own errors) — never fails the run.
+        const features = commit === undefined ? [] : yield* changedFeatures(commit)
+        yield* Effect.promise(async () => {
+          await journal(env.root, "built", `${options.prompt}${commit ? ` → ${commit}` : ""}`)
+          for (const name of features) await upsertAppPage(env.root, name, { prompt: options.prompt, commit })
+        })
         return { ...piResult, commit }
       }).pipe(
         Effect.matchEffect({

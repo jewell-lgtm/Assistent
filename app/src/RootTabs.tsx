@@ -1,5 +1,4 @@
 import type { AppTabCapability } from "@assistant/capabilities-ui/app"
-import { PiProxy } from "@assistant/capabilities-ui/pi"
 import { Ionicons } from "@expo/vector-icons"
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs"
 import { Effect } from "effect"
@@ -9,16 +8,16 @@ import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, TouchableOpaci
 import { useSafeAreaInsets } from "react-native-safe-area-context"
 import { CodeScreen } from "./CodeScreen"
 import { ErrorBoundary } from "./ErrorBoundary"
-import { apiPost, PiProxyLive } from "./PiProxy"
+import { apiPost } from "./PiProxy"
 import { userspaceApp } from "./userspace.gen"
 
-const runPi = (prompt: string) =>
+// Chat has memory: /api/chat runs the LLM with vault remember/recall tools, so
+// "remember I like BLTs" persists and "remind me what I like" searches back.
+const runChat = (message: string) =>
   Effect.runPromise(
-    PiProxy.pipe(
-      Effect.flatMap((pi) => pi.run({ prompt })),
-      Effect.provide(PiProxyLive),
-      Effect.map((r) => `[${r.model}]\n${r.text}`),
-      Effect.catchAll((e) => Effect.succeed(`PiError: ${e.message}`))
+    apiPost("/api/chat", { message }).pipe(
+      Effect.map((r: any) => String(r.text ?? "")),
+      Effect.catchAll((e) => Effect.succeed(`error: ${e.message}`))
     )
   )
 
@@ -57,7 +56,7 @@ const PromptScreen = ({ note, submit }: { note: string; submit: (prompt: string)
 }
 
 const ChatScreen = () => (
-  <PromptScreen note="chat lands in E4 — this exercises PiProxy → /api/pi/run" submit={runPi} />
+  <PromptScreen note="Ask me anything. Say “remember …” to save a note, or “remind me …” to recall." submit={runChat} />
 )
 
 type Feature = {

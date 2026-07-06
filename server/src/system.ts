@@ -11,6 +11,7 @@ import { Config, Effect, Redacted } from "effect"
 import * as path from "node:path"
 import { codingEnv, commitUserspace, resetAllState } from "./code.js"
 import { codingRunEventStream, getCodingRunStatus, startCodingRun } from "./coding-runs.js"
+import { journal, searchVault } from "./vault.js"
 
 const OpsdUrl = Config.string("OPSD_URL").pipe(Config.withDefault("http://host.orb.internal:9876"))
 const OpsdToken = Config.redacted("OPSD_TOKEN")
@@ -96,6 +97,36 @@ const piRun = (fixed?: Partial<PiRunOptions>) =>
       )
     )
   })
+
+// Chat with memory: a plain LLM turn PLUS vault remember/recall tools, so
+// "remember X" persists to the Obsidian vault and "remind me" searches it.
+// Same engine single-flight as coding; journaled for the activity log.
+const chat = Effect.gen(function* () {
+  const req = yield* HttpServerRequest.HttpServerRequest
+  const body = yield* req.text
+  const parsed = parsePiRun(body)
+  if (parsed === undefined) {
+    return yield* HttpServerResponse.json({ error: "message required" }, { status: 400 })
+  }
+  const env = yield* codingEnv
+  yield* Effect.promise(() => journal(env.root, "chat", parsed.prompt.slice(0, 200)))
+  // RAG-style recall: always search the vault for the user's message and inject
+  // the top hits as context, so recall is deterministic instead of hoping the
+  // model calls the recall tool. The remember tool still handles saving.
+  const hits = yield* Effect.promise(() => searchVault(env.root, parsed.prompt))
+  const context =
+    hits.length === 0
+      ? ""
+      : `\n\nRelevant notes from the user's vault (use these to answer):\n${hits.map((h) => `- ${h.line}`).join("\n")}`
+  const options: PiRunOptions = { ...parsed, prompt: parsed.prompt + context, tools: "chat" }
+  const pi = yield* PiClient
+  return yield* pi.run(options).pipe(
+    Effect.flatMap((result) => HttpServerResponse.json({ ok: true, ...result })),
+    Effect.catchTag("PiError", (e) =>
+      HttpServerResponse.json({ error: e.message }, { status: e.message === "busy" ? 409 : 500 })
+    )
+  )
+})
 
 // the self-mod coder, async: accepts and returns {runId} immediately (202),
 // the Pi session + userspace commit run in a background fiber (see
@@ -185,6 +216,7 @@ export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
     // "busy" flag, so letting a client request tools:"coding" here would let
     // a coding run bypass single-flight and race a concurrent one.
     HttpRouter.post("/api/pi/run", piRun({ tools: "none" })),
+    HttpRouter.post("/api/chat", chat),
     HttpRouter.post("/api/system/reset", systemReset),
     HttpRouter.get("/api/motd", motd)
   )

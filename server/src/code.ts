@@ -1,4 +1,5 @@
 import { PiClient, PiError, type PiRunOptions } from "@assistant/capabilities-server/pi"
+import { rememberNote, searchVault } from "./vault.js"
 import { Config, Effect, Layer } from "effect"
 import { execFile } from "node:child_process"
 import { constants as fsConstants, readFileSync } from "node:fs"
@@ -187,6 +188,56 @@ const typecheckTool = defineTool({
   }
 })
 
+// Chat memory tools (tools:"chat"): let the assistant persist and recall notes
+// in the Obsidian vault, scoped to the vault dir — no code editing, no bash.
+const vaultTools = (root: string) =>
+  [
+    defineTool({
+      name: "remember",
+      label: "Remember",
+      description: "Save a note to the user's Obsidian vault so it can be recalled later. Use when the user says to remember something.",
+      promptSnippet: "save a note to the vault when asked to remember something",
+      parameters: Type.Object({ note: Type.String({ description: "the fact to remember, phrased as a standalone note" }) }),
+      async execute(_id, params) {
+        const saved = await rememberNote(root, (params as { note: string }).note)
+        return { content: [{ type: "text" as const, text: `Remembered: ${saved}` }], details: {} }
+      }
+    }),
+    defineTool({
+      name: "recall",
+      label: "Recall",
+      description: "Search the user's Obsidian vault (memories, journal, app pages) for anything matching a query. Use to answer 'remind me' / 'what did I' / 'do you remember' questions.",
+      promptSnippet: "search the vault to answer questions about past notes, apps, or activity",
+      parameters: Type.Object({ query: Type.String({ description: "keywords to search for" }) }),
+      async execute(_id, params) {
+        const hits = await searchVault(root, (params as { query: string }).query)
+        const text =
+          hits.length === 0
+            ? "No matching notes in the vault."
+            : hits.map((h) => `- (${h.file}) ${h.line}`).join("\n")
+        return { content: [{ type: "text" as const, text }], details: {} }
+      }
+    })
+  ] as NonNullable<CreateAgentSessionOptions["customTools"]>
+
+const CHAT_SYSTEM_PROMPT = `You are the user's personal assistant inside a self-modifying app. You have a memory: an Obsidian vault of markdown notes.
+- When the user tells you to remember something, call the "remember" tool.
+- When the user asks what they told you, to remind them, or about apps/activity, call the "recall" tool first, then answer from what it returns.
+- Keep replies short and direct.`
+
+const chatResourceLoader = async (root: string, onRunaway: () => void) => {
+  const loader = new DefaultResourceLoader({
+    cwd: root,
+    agentDir: getAgentDir(),
+    noContextFiles: true,
+    noExtensions: true,
+    appendSystemPrompt: [CHAT_SYSTEM_PROMPT],
+    extensionFactories: [runawayGuard(onRunaway)]
+  })
+  await loader.reload({ resolveProjectTrust: async () => false })
+  return loader
+}
+
 // Durable session storage on the rw /pi-agent mount (PI_CODING_AGENT_DIR), NOT
 // userspace — session JSONL is engine bookkeeping, not feature data. getAgentDir()
 // falls back to ~/.pi/agent when PI_CODING_AGENT_DIR is unset (local dev), so this
@@ -227,23 +278,30 @@ export const runPi = async (
   if (provider === "ollama") model = { ...model, baseUrl: env.ollamaBaseUrl }
 
   const coding = options.tools === "coding"
+  const chat = options.tools === "chat"
   // session.abort() makes the outstanding prompt() resolve normally (not
   // reject) — every abort path (timeout AND runaway guard) records its reason
   // here so an aborted run is reported as a failure, never as a successful
   // "done" with truncated output.
   let abortReason: string | undefined
+  const onRunaway = () => {
+    abortReason = `run aborted by runaway guard at ${RUNAWAY_TURN_CAP} turns`
+  }
   const { session } = await createAgentSession({
     cwd: env.root,
     model,
-    tools: coding ? ["read", "edit", "write", "grep", "find", "ls", "typecheck"] : [],
+    tools: coding ? ["read", "edit", "write", "grep", "find", "ls", "typecheck"] : chat ? ["remember", "recall"] : [],
     ...(coding
       ? {
           customTools: [...guardedTools(env.root), typecheckTool],
-          resourceLoader: await codingResourceLoader(env.root, () => {
-            abortReason = `run aborted by runaway guard at ${RUNAWAY_TURN_CAP} turns`
-          })
+          resourceLoader: await codingResourceLoader(env.root, onRunaway)
         }
-      : {}),
+      : chat
+        ? {
+            customTools: vaultTools(env.root),
+            resourceLoader: await chatResourceLoader(env.root, onRunaway)
+          }
+        : {}),
     sessionManager: SessionManager.create(env.root, piSessionDir())
   })
   const unsubscribe = onEvent !== undefined ? session.subscribe(onEvent) : undefined
@@ -339,6 +397,24 @@ export const stashUserspaceResidue = (label: string) =>
       },
       catch: (e) => new PiError({ message: `failed-run residue stash failed: ${String(e)}` })
     })
+  })
+
+/** Feature names touched by a userspace commit (for vault app pages). */
+export const changedFeatures = (sha: string) =>
+  Effect.gen(function* () {
+    const root = yield* UserspaceDir
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const { stdout } = await execFileP("git", ["-C", root, "show", "--name-only", "--format=", sha])
+        const names = new Set<string>()
+        for (const line of stdout.split("\n")) {
+          const m = line.match(/^features\/([^/]+)\//)
+          if (m !== null) names.add(m[1]!)
+        }
+        return [...names]
+      },
+      catch: () => new PiError({ message: "changedFeatures failed" })
+    }).pipe(Effect.orElseSucceed(() => [] as Array<string>))
   })
 
 /** Commit whatever the agent changed in the userspace repo. */

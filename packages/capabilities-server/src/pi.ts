@@ -13,8 +13,9 @@ export interface PiRunOptions {
   readonly routing?: PiRouting
   /** Override the routed model id. */
   readonly model?: string
-  /** "coding" = userspace-confined file tools; "none" = plain LLM turn (default). */
-  readonly tools?: "none" | "coding"
+  /** "coding" = userspace-confined file tools; "chat" = vault memory tools
+   *  (remember/recall); "none" = plain LLM turn (default). */
+  readonly tools?: "none" | "coding" | "chat"
 }
 
 export interface PiRunResult {
