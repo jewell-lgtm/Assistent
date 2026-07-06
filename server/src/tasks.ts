@@ -552,9 +552,7 @@ export const listTasks = (limit = 20): Effect.Effect<ReadonlyArray<Task>, TaskDb
   Effect.flatMap(TaskRepo, (repo) => repo.listRecent(limit))
 
 const encoder = new TextEncoder()
-// frames are serialized structurally; the legacy mapper below emits the old
-// wire dialect, hence `object` rather than TaskEvent here
-const sseChunk = (frame: object): Uint8Array => encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)
+const sseChunk = (frame: TaskEvent): Uint8Array => encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)
 const HEARTBEAT = encoder.encode(`: hb\n\n`)
 
 /**
@@ -563,10 +561,7 @@ const HEARTBEAT = encoder.encode(`: hb\n\n`)
  * undefined when the task has no live entry here (unknown id, or a pre-restart
  * task) — callers fall back to the durable row.
  */
-export const taskEventStream = (
-  id: string,
-  mapFrame: (frame: TaskEvent) => object | undefined = (f) => f
-): Stream.Stream<Uint8Array> | undefined => {
+export const taskEventStream = (id: string): Stream.Stream<Uint8Array> | undefined => {
   const entry = live.get(id)
   if (entry === undefined) return undefined
 
@@ -578,17 +573,13 @@ export const taskEventStream = (
         if (entry.truncated) {
           void emit.single(sseChunk({ type: "token", text: "…[earlier output truncated]\n" }))
         }
-        const push = (frame: TaskEvent) => {
-          const mapped = mapFrame(frame)
-          if (mapped !== undefined) void emit.single(sseChunk(mapped))
-        }
-        for (const frame of entry.events) push(frame)
+        for (const frame of entry.events) void emit.single(sseChunk(frame))
         if (entry.task.status !== "running") {
           void emit.end()
           return undefined
         }
         const listener = (frame: TaskEvent) => {
-          push(frame)
+          void emit.single(sseChunk(frame))
           if (frame.type === "task") void emit.end()
         }
         entry.listeners.add(listener)
@@ -606,45 +597,3 @@ export const taskEventStream = (
   )
 }
 
-// ---------------------------------------------------------------------------
-// Legacy /api/system/code* compatibility (dropped once the P2 app bundle ships)
-// ---------------------------------------------------------------------------
-
-/** Old CodingRunStatus wire shape. */
-export const legacyStatusOf = (task: Task) => {
-  const base = {
-    ...(task.result !== undefined ? { result: task.result } : {}),
-    ...(task.error !== undefined ? { error: task.error } : {})
-  }
-  switch (task.status) {
-    case "running":
-      return { status: "running" as const, ...base }
-    case "succeeded":
-      return { status: "done" as const, ...base }
-    case "failed":
-      return { status: "failed" as const, ...base }
-    case "interrupted":
-      return { status: "failed" as const, ...base, error: task.error ?? "server restarted mid-task" }
-  }
-}
-
-/**
- * Old SSE dialect: token/tool pass through, step frames are dropped, the
- * terminal task frame becomes done/error. NOTE the old app reacts to `done`
- * by running reload+publish itself — redundant after this server already did
- * (harmless: reload commits nothing new, publish re-exports), and gone once
- * the P2 bundle lands.
- */
-export const toLegacyFrame = (frame: TaskEvent): object | undefined => {
-  switch (frame.type) {
-    case "token":
-    case "tool":
-      return frame
-    case "step":
-      return undefined
-    case "task":
-      return frame.status === "succeeded"
-        ? { type: "done", result: frame.result }
-        : { type: "error", message: frame.error ?? "failed" }
-  }
-}
