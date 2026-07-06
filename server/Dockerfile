@@ -8,7 +8,10 @@ FROM node:22-alpine
 RUN apk add --no-cache git ripgrep && npm install -g pnpm@10.20.0
 WORKDIR /app
 COPY --from=pruner /app/out/json/ .
-RUN pnpm install --frozen-lockfile
+# better-sqlite3 (appspace db) has no musl prebuilds — build it, then drop the toolchain
+RUN apk add --no-cache --virtual .gyp python3 make g++ \
+  && pnpm install --frozen-lockfile \
+  && apk del .gyp
 COPY --from=pruner /app/out/full/ .
 COPY scripts/gen-userspace.mjs scripts/
 COPY scripts/bootstrap-userspace.mjs scripts/

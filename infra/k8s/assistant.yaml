@@ -48,10 +48,14 @@ spec:
               value: /pi-agent
             - name: OLLAMA_BASE_URL
               value: http://host.orb.internal:11434/v1
+            - name: APPSPACE_DB
+              value: /data/appspace/appspace.db
           volumeMounts:
             - name: updates
               mountPath: /data/updates
               readOnly: true
+            - name: appspace
+              mountPath: /data/appspace # rw: task rows + (P3) feature KV; litestream tails it host-side
             - name: repo
               mountPath: /repo
             - name: pi-agent
@@ -71,6 +75,10 @@ spec:
         - name: updates
           hostPath:
             path: /Users/mattisfrommars/assistant-data/updates
+            type: DirectoryOrCreate
+        - name: appspace
+          hostPath:
+            path: /Users/mattisfrommars/assistant-data/appspace
             type: DirectoryOrCreate
         - name: repo
           hostPath:

@@ -7,10 +7,12 @@ import {
   HttpServerResponse
 } from "@effect/platform"
 import { PiClient, type PiRunOptions } from "@assistant/capabilities-server/pi"
-import { Config, Effect, Redacted } from "effect"
+import { Task, TaskList, type TaskEvent } from "@assistant/platform-api/tasks"
+import { Config, Effect, Option, Schema, Stream } from "effect"
+import { Redacted } from "effect"
 import * as path from "node:path"
 import { codingEnv, commitUserspace, resetAllState } from "./code.js"
-import { codingRunEventStream, getCodingRunStatus, startCodingRun } from "./coding-runs.js"
+import { getTask, legacyStatusOf, listTasks, startCodeTask, taskEventStream, toLegacyFrame } from "./tasks.js"
 import { journal, searchVault } from "./vault.js"
 
 const OpsdUrl = Config.string("OPSD_URL").pipe(Config.withDefault("http://host.orb.internal:9876"))
@@ -128,50 +130,102 @@ const chat = Effect.gen(function* () {
   )
 })
 
-// the self-mod coder, async: accepts and returns {runId} immediately (202),
-// the Pi session + userspace commit run in a background fiber (see
-// coding-runs.ts). Phone-friendly: a multi-minute run can't hold an HTTP
-// request open across a screen lock.
-const codeStart = Effect.gen(function* () {
-  const req = yield* HttpServerRequest.HttpServerRequest
-  const body = yield* req.text
-  const parsed = parsePiRun(body)
-  if (parsed === undefined) {
-    return yield* HttpServerResponse.json({ error: "prompt required" }, { status: 400 })
-  }
-  const options: PiRunOptions = { ...parsed, tools: "coding" }
-  const env = yield* codingEnv
-  return yield* startCodingRun(env, options).pipe(
-    Effect.flatMap(({ runId }) => HttpServerResponse.json({ runId }, { status: 202 })),
-    Effect.catchTag("PiError", (e) =>
-      HttpServerResponse.json({ error: e.message }, { status: e.message === "busy" ? 409 : 500 })
+// the self-mod coder, async: accepts and returns immediately (202) with the
+// task id; the WHOLE pipeline (Pi session → commit → OTA publish → reload)
+// runs server-side (see tasks.ts). The phone can go offline the moment it
+// has the id — foregrounding later reads the durable task row.
+const taskStart = (legacy: boolean) =>
+  Effect.gen(function* () {
+    const req = yield* HttpServerRequest.HttpServerRequest
+    const body = yield* req.text
+    const parsed = parsePiRun(body)
+    if (parsed === undefined) {
+      return yield* HttpServerResponse.json({ error: "prompt required" }, { status: 400 })
+    }
+    const options: PiRunOptions = { ...parsed, tools: "coding" }
+    const env = yield* codingEnv
+    return yield* startCodeTask(env, options).pipe(
+      Effect.flatMap(({ taskId }) =>
+        HttpServerResponse.json(legacy ? { runId: taskId } : { taskId }, { status: 202 })
+      ),
+      Effect.catchTag("PiError", (e) =>
+        HttpServerResponse.json({ error: e.message }, { status: e.message === "busy" ? 409 : 500 })
+      )
     )
-  )
-})
-
-// SSE stream of a run's live events. If the run already finished, emits the
-// terminal event once and closes instead of hanging on a reconnect.
-const codeStream = Effect.gen(function* () {
-  const params = yield* HttpRouter.params
-  const stream = codingRunEventStream(params["runId"] ?? "")
-  if (stream === undefined) {
-    return yield* HttpServerResponse.json({ error: "not found" }, { status: 404 })
-  }
-  return yield* HttpServerResponse.stream(stream, {
-    headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
   })
-})
 
-// Plain JSON status/result — the SSE-reconnect backstop for when a phone's
-// stream connection dies (screen lock). Works with no prior stream ever
-// having been opened for this runId.
-const codeStatus = Effect.gen(function* () {
-  const params = yield* HttpRouter.params
-  const status = getCodingRunStatus(params["runId"] ?? "")
-  if (status === undefined) {
-    return yield* HttpServerResponse.json({ error: "not found" }, { status: 404 })
-  }
-  return yield* HttpServerResponse.json(status)
+const encodeTask = Schema.encodeSync(Task)
+const encodeTaskList = Schema.encodeSync(TaskList)
+
+// Synthesized replay for a task with no live entry in this process (finished
+// before a restart): its step history + terminal frame straight from the row,
+// so a late/reconnecting stream consumer still converges.
+const rowFrames = (task: Task): ReadonlyArray<TaskEvent> => [
+  ...task.steps.map(
+    (s): TaskEvent => ({
+      type: "step",
+      name: s.name,
+      status: s.status,
+      ...(s.detail !== undefined ? { detail: s.detail } : {})
+    })
+  ),
+  ...(task.status !== "running"
+    ? [
+        {
+          type: "task",
+          status: task.status,
+          ...(task.result !== undefined ? { result: task.result } : {}),
+          ...(task.error !== undefined ? { error: task.error } : {})
+        } satisfies TaskEvent
+      ]
+    : [])
+]
+
+const sseHeaders = {
+  "content-type": "text/event-stream",
+  "cache-control": "no-cache",
+  connection: "keep-alive"
+} as const
+
+const encoder = new TextEncoder()
+
+const taskStream = (legacy: boolean) =>
+  Effect.gen(function* () {
+    const params = yield* HttpRouter.params
+    const id = params[legacy ? "runId" : "taskId"] ?? ""
+    const mapFrame = legacy ? toLegacyFrame : (f: TaskEvent) => f
+    const stream = taskEventStream(id, mapFrame)
+    if (stream !== undefined) {
+      return yield* HttpServerResponse.stream(stream, { headers: sseHeaders })
+    }
+    // no live entry (pre-restart task): replay the durable row and close
+    const task = yield* getTask(id).pipe(Effect.catchAll(() => Effect.succeedNone))
+    if (Option.isNone(task)) {
+      return yield* HttpServerResponse.json({ error: "not found" }, { status: 404 })
+    }
+    const frames = rowFrames(task.value)
+      .map(mapFrame)
+      .filter((f): f is object => f !== undefined)
+      .map((f) => encoder.encode(`data: ${JSON.stringify(f)}\n\n`))
+    return yield* HttpServerResponse.stream(Stream.fromIterable(frames), { headers: sseHeaders })
+  })
+
+// Plain JSON status — the durable backstop; works with no stream ever opened
+// and across pod restarts.
+const taskGet = (legacy: boolean) =>
+  Effect.gen(function* () {
+    const params = yield* HttpRouter.params
+    const id = params[legacy ? "runId" : "taskId"] ?? ""
+    const task = yield* getTask(id).pipe(Effect.catchAll(() => Effect.succeedNone))
+    if (Option.isNone(task)) {
+      return yield* HttpServerResponse.json({ error: "not found" }, { status: 404 })
+    }
+    return yield* HttpServerResponse.json(legacy ? legacyStatusOf(task.value) : encodeTask(task.value))
+  })
+
+const tasksList = Effect.gen(function* () {
+  const tasks = yield* listTasks(20).pipe(Effect.catchAll(() => Effect.succeed([] as ReadonlyArray<Task>)))
+  return yield* HttpServerResponse.json(encodeTaskList({ tasks }))
 })
 
 // Demo/PoC reset: wipe all assistant-built state, then exit — kubernetes
@@ -196,9 +250,15 @@ export const systemRoutes = <E, R>(router: HttpRouter.HttpRouter<E, R>) =>
     HttpRouter.post("/api/system/redeploy", proxy("/redeploy")),
     HttpRouter.post("/api/system/reload", proxy("/reload")),
     HttpRouter.post("/api/system/publish-ota", proxy("/publish-ota")),
-    HttpRouter.post("/api/system/code", codeStart),
-    HttpRouter.get("/api/system/code/:runId/stream", codeStream),
-    HttpRouter.get("/api/system/code/:runId", codeStatus),
+    // tasks: the durable async-pipeline surface (P1 of design-async-tasks.md)
+    HttpRouter.post("/api/tasks", taskStart(false)),
+    HttpRouter.get("/api/tasks", tasksList),
+    HttpRouter.get("/api/tasks/:taskId/stream", taskStream(false)),
+    HttpRouter.get("/api/tasks/:taskId", taskGet(false)),
+    // legacy dialect for the pre-P2 app bundle — same engine underneath
+    HttpRouter.post("/api/system/code", taskStart(true)),
+    HttpRouter.get("/api/system/code/:runId/stream", taskStream(true)),
+    HttpRouter.get("/api/system/code/:runId", taskGet(true)),
     // generic engine access — the endpoint behind the app-side PiProxy. Forced
     // to tools:"none": coding tools write to + commit the userspace repo,
     // guarded only by /api/system/code's own activeRunId single-flight (see

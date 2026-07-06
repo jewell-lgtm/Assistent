@@ -9,9 +9,12 @@
   },
   "dependencies": {
     "@assistant/capabilities-server": "workspace:*",
+    "@assistant/platform-api": "workspace:*",
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@effect/platform": "*",
     "@effect/platform-node": "*",
+    "@effect/sql": "^0.51.1",
+    "@effect/sql-sqlite-node": "^0.52.0",
     "effect": "*",
     "tsx": "*",
     "typebox": "*",

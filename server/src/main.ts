@@ -4,8 +4,10 @@ import { Config, Effect, Layer, Redacted } from "effect"
 import { createServer } from "node:http"
 import { FetchHttpClient } from "@effect/platform"
 import { PiClientLive } from "./code.js"
+import { SqlLive } from "./db.js"
 import { otaRoutes } from "./ota.js"
 import { systemRoutes } from "./system.js"
+import { TaskRepoLive } from "./tasks.js"
 import { userspaceRoutes } from "./userspace.js"
 
 const GitSha = Config.string("GIT_SHA").pipe(Config.withDefault("dev"))
@@ -63,11 +65,15 @@ const ServerLive = Layer.unwrapEffect(
   Effect.map(Port, (port) => NodeHttpServer.layer(() => createServer(), { port, host: "0.0.0.0" }))
 )
 
+// TaskRepo's layer init runs the sqlite migration AND the boot reconciler
+// (tasks orphaned by the previous pod generation) before any route is served.
+const TasksLive = TaskRepoLive.pipe(Layer.provide(SqlLive))
+
 NodeRuntime.runMain(
   Layer.launch(
     Layer.provide(
       app,
-      Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer, PiClientLive)
+      Layer.mergeAll(ServerLive, NodeContext.layer, FetchHttpClient.layer, PiClientLive, TasksLive)
     )
   )
 )
