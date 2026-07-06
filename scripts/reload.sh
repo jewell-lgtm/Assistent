@@ -13,6 +13,11 @@ MSG="${1:-reload}"
 if [ -d userspace/.git ] && [ -n "$(git -C userspace status --porcelain)" ]; then
   git -C userspace add -A && git -C userspace commit -m "$MSG"
 fi
+# keep the bare remote current — server-side pushes only fire on server-side
+# commits, so host-side commits (this script's, redeploy's) push here
+if [ -d userspace/.git ] && [ -d "$HOME/assistant-data/appspace/userspace.git" ]; then
+  git -C userspace push "$HOME/assistant-data/appspace/userspace.git" HEAD:main || true
+fi
 
 # same gate the deploy path runs: broken userspace server TS never reaches the
 # pod (core tsc can't see the cast dynamic import, so this is the backstop).

@@ -11,6 +11,10 @@ fi
 if [ -d userspace/.git ] && [ -n "$(git -C userspace status --porcelain)" ]; then
   git -C userspace add -A && git -C userspace commit -m "$MSG"
 fi
+# keep the bare remote current (host-side commits don't ride the server push)
+if [ -d userspace/.git ] && [ -d "$HOME/assistant-data/appspace/userspace.git" ]; then
+  git -C userspace push "$HOME/assistant-data/appspace/userspace.git" HEAD:main || true
+fi
 
 pnpm install --frozen-lockfile
 # gate: broken userspace server TS never reaches the pod — core tsc doesn't
