@@ -2,9 +2,7 @@
 # ONE-SHOT migration runbook: turn the legacy single-tenant stack into user
 # "matt" under the per-user layout. Runs ON the mini, by a human, AFTER the
 # per-user scripts + opsd v2 have been rsync'd over. ~5 min downtime.
-# Keeps matt's EXISTING API_TOKEN and nodePort 30880 so the installed APK
-# (baked legacy token + assistant.wire.… OTA URL) keeps working untouched;
-# the legacy Caddy vhost stays as an alias.
+# Fresh tokens — install the generic APK and re-pair the phone afterwards.
 set -eu
 export PATH="/opt/homebrew/bin:/Applications/OrbStack.app/Contents/MacOS/xbin:$PATH"
 cd "$(dirname "$0")/.."
@@ -17,8 +15,8 @@ fi
 kubectl -n assistant get deploy assistant-server >/dev/null || { echo "no legacy stack found" >&2; exit 1; }
 
 echo "== capturing legacy state"
-API_TOKEN=$(kubectl -n assistant get secret assistant-secrets -o jsonpath='{.data.API_TOKEN}' | base64 -d)
 TAG=$(kubectl -n assistant get deploy assistant-server -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
+API_TOKEN=$(openssl rand -hex 24)
 OPSD_TOKEN=$(openssl rand -hex 24)
 
 echo "== stopping writers (litestream, pod)"
@@ -75,9 +73,10 @@ if [ -n "${CADDY_SSH:-}" ]; then
   scp "$USERS_ROOT/caddy-users.caddy" "$CADDY_SSH:/etc/caddy/caddy-users.caddy"
   ssh "$CADDY_SSH" "sudo systemctl reload caddy"
 else
-  echo "caddy: CADDY_SSH unset — push $USERS_ROOT/caddy-users.caddy manually (legacy vhost stays as matt's alias)"
+  echo "caddy: CADDY_SSH unset — push $USERS_ROOT/caddy-users.caddy manually"
 fi
 
 echo
-echo "MIGRATED. Verify: phone still chats + OTA works on the legacy domain;"
-echo "a self-mod task publishes into $USERS_ROOT/matt/updates/1/<ts> and reloads assistant-matt."
+echo "MIGRATED. Install the generic APK and pair with:"
+printf '{"v":1,"u":"https://matt.%s","t":"%s","n":"matt"}\n' "${DOMAIN_SUFFIX:-assistant.wire.mattjewell.co.uk}" "$API_TOKEN"
+echo "Then verify: a self-mod task publishes into $USERS_ROOT/matt/updates/1/<ts> and reloads assistant-matt."

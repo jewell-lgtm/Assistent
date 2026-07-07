@@ -18,10 +18,6 @@ DEST="$USERS_ROOT/$U/updates/$RUNTIME_VERSION"
 # watches ../userspace). Sound ONLY under opsd's single global busy lock.
 ln -sfn "$USERS_ROOT/$U/userspace" userspace
 
-# Tokens are device-side now (pairing screen); nothing secret is baked into
-# bundles. Explicit empty keeps app.config's legacy extra.apiToken inert.
-export API_TOKEN=""
-
 pnpm install --frozen-lockfile
 node scripts/gen-userspace.mjs
 # gate: broken userspace/app TS never ships (core tsconfig skips userspace →
