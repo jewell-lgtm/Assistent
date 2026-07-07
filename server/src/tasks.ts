@@ -344,18 +344,18 @@ const opsdCall = (
     )
   )
 
-// opsd is single-flight for ALL callers (manual redeploys included), so a
-// 409 just means "someone else's script is running" — wait it out briefly
-// instead of failing the whole task.
+// opsd is single-flight for ALL callers across ALL users (builds mutate the
+// shared checkout), so a 409 just means "someone else's script is running".
+// N users' expo exports run minutes each — wait out a full window.
 const opsdStep = (opsdPath: string, message: string) =>
   opsdCall(opsdPath, message).pipe(
     Effect.retry({
       while: (e) => e._tag === "OpsdBusy",
       schedule: Schedule.spaced("15 seconds"),
-      times: 8
+      times: 60
     }),
     Effect.mapError((e) =>
-      e._tag === "OpsdBusy" ? new StepError({ message: `${opsdPath}: opsd busy, gave up after 2m` }) : e
+      e._tag === "OpsdBusy" ? new StepError({ message: `${opsdPath}: opsd busy, gave up after 15m` }) : e
     )
   )
 

@@ -13,6 +13,7 @@ import { userspaceRoutes } from "./userspace.js"
 const GitSha = Config.string("GIT_SHA").pipe(Config.withDefault("dev"))
 const Port = Config.integer("PORT").pipe(Config.withDefault(8080))
 const ApiToken = Config.redacted("API_TOKEN")
+const UserName = Config.string("USER_NAME").pipe(Config.withDefault("dev"))
 
 const healthz = Effect.gen(function* () {
   const sha = yield* GitSha
@@ -49,7 +50,10 @@ const router = Effect.map(userspaceRoutes, (withUserspace) =>
     HttpRouter.get("/healthz", healthz),
     HttpRouter.get(
       "/api/whoami",
-      HttpServerResponse.json({ app: "local-assistent", experiment: true })
+      Effect.gen(function* () {
+        const user = yield* UserName
+        return yield* HttpServerResponse.json({ app: "local-assistent", user })
+      })
     ),
     otaRoutes,
     systemRoutes,
