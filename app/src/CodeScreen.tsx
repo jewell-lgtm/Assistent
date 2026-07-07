@@ -3,7 +3,7 @@ import type { StepName, StepStatus, Task, TaskResult } from "@assistant/platform
 import * as Updates from "expo-updates"
 import { useEffect, useRef, useState } from "react"
 import { Alert, AppState, ScrollView, StyleSheet, View } from "react-native"
-import { API_TOKEN, BASE_URL } from "./PiProxy"
+import { getBaseUrl, getToken } from "./pairing"
 import { connectSse, type SseFrame } from "./sse"
 import { decodeTaskFrame, fetchTask, fetchTasks, startTask } from "./tasks"
 
@@ -206,8 +206,8 @@ export const CodeScreen = () => {
       void reconcile(taskId)
     }, STALL_CHECK_MS)
     const handle = connectSse(
-      `${BASE_URL}/api/tasks/${encodeURIComponent(taskId)}/stream`,
-      { authorization: `Bearer ${API_TOKEN}` },
+      `${getBaseUrl()}/api/tasks/${encodeURIComponent(taskId)}/stream`,
+      { authorization: `Bearer ${getToken()}` },
       {
         // Heartbeat comments (`: hb`) never reach onEvent — feed the watchdog
         // on raw byte activity so quiet-but-alive streams aren't killed.
@@ -360,9 +360,9 @@ export const CodeScreen = () => {
   const postOps = async (path: string, attempts = 1): Promise<{ ok: boolean; text: string }> => {
     for (let i = 0; i < attempts; i++) {
       try {
-        const res = await fetch(`${BASE_URL}${path}`, {
+        const res = await fetch(`${getBaseUrl()}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
+          headers: { "content-type": "application/json", authorization: `Bearer ${getToken()}` },
           body: "{}"
         })
         const text = await res.text()
@@ -386,7 +386,7 @@ export const CodeScreen = () => {
   // actually happened (reset confirmation).
   const serverStartedAt = async (): Promise<string | null> => {
     try {
-      const res = await fetch(`${BASE_URL}/healthz`, { method: "GET" })
+      const res = await fetch(`${getBaseUrl()}/healthz`, { method: "GET" })
       if (!res.ok) return null
       const j: unknown = await res.json()
       const startedAt = (j as { startedAt?: unknown })?.startedAt

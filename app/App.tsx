@@ -1,9 +1,10 @@
 import { NavigationContainer } from "@react-navigation/native"
 import { StatusBar } from "expo-status-bar"
 import * as Updates from "expo-updates"
-import { useEffect, useRef } from "react"
-import { AppState } from "react-native"
+import { useEffect, useRef, useState } from "react"
+import { AppState, Text, View } from "react-native"
 import { SafeAreaProvider } from "react-native-safe-area-context"
+import { isPaired, loadPairing } from "./src/pairing"
 import { RootTabs } from "./src/RootTabs"
 
 // Foreground sync: every time the app comes to the foreground, check for an
@@ -18,7 +19,7 @@ const useForegroundOtaSync = () => {
   const busyRef = useRef(false)
   useEffect(() => {
     const sync = async () => {
-      if (busyRef.current || __DEV__) return
+      if (busyRef.current || __DEV__ || !isPaired()) return
       busyRef.current = true
       try {
         const check = await Updates.checkForUpdateAsync()
@@ -41,11 +42,26 @@ const useForegroundOtaSync = () => {
 
 export default function App() {
   useForegroundOtaSync()
+  // Pairing gate: nothing that fires a request (CodeScreen mounts eagerly)
+  // renders until the stored pairing is loaded into the module cache.
+  const [phase, setPhase] = useState<"loading" | "unpaired" | "paired">("loading")
+  useEffect(() => {
+    loadPairing()
+      .then((p) => setPhase(p === null ? "unpaired" : "paired"))
+      .catch(() => setPhase("unpaired"))
+  }, [])
+  if (phase === "loading") return null
   return (
     <SafeAreaProvider>
-      <NavigationContainer>
-        <RootTabs />
-      </NavigationContainer>
+      {phase === "paired" ? (
+        <NavigationContainer>
+          <RootTabs />
+        </NavigationContainer>
+      ) : (
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <Text>Not paired to a server.</Text>
+        </View>
+      )}
       <StatusBar style="auto" />
     </SafeAreaProvider>
   )

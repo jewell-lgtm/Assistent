@@ -1,16 +1,10 @@
 import { PiProxy, type PiRunOptions, type PiRunResult } from "@assistant/capabilities-ui/pi"
-import Constants from "expo-constants"
 import { Data, Effect, Layer } from "effect"
+import { getBaseUrl, getToken } from "./pairing"
 
 // capabilities-ui re-exports PiError as a type only — structurally identical
 // local class so core can construct it without a capabilities-server dep.
 class PiError extends Data.TaggedError("PiError")<{ readonly message: string }> {}
-
-// Public https via Caddy on the Lightsail box → wg tunnel → mini:30880, so the
-// app works from anywhere, not just the home LAN. (The old LAN URL
-// http://192.168.86.118:30880 only worked on home wifi.)
-export const BASE_URL = "https://assistant.wire.mattjewell.co.uk"
-export const API_TOKEN: string = Constants.expoConfig?.extra?.["apiToken"] ?? ""
 
 export interface ApiResponse {
   readonly status: number
@@ -23,9 +17,9 @@ export interface ApiResponse {
 const request = (method: "GET" | "POST", apiPath: string, body?: unknown) =>
   Effect.tryPromise({
     try: async (): Promise<ApiResponse> => {
-      const res = await fetch(`${BASE_URL}${apiPath}`, {
+      const res = await fetch(`${getBaseUrl()}${apiPath}`, {
         method,
-        headers: { "content-type": "application/json", authorization: `Bearer ${API_TOKEN}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${getToken()}` },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {})
       })
       const json: unknown = await res.json().catch(() => ({}))
