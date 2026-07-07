@@ -1,18 +1,26 @@
 #!/bin/sh
-# Runs ON the mini (via opsd). Typecheck gate -> expo export -> updates dir.
+# Runs ON the mini (via opsd). Per-user OTA publish: typecheck gate -> expo
+# export against the USER's userspace -> their updates dir.
+# usage: publish-ota-mini.sh <user> [msg]
 set -eu
 export PATH="$HOME/.local/share/mise/shims:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
+. scripts/lib-users.sh
+
+U="${1:?usage: publish-ota-mini.sh <user> [msg]}"
+require_user "$U"
 
 RUNTIME_VERSION="1" # keep in sync with app.config.ts
 TS=$(date +%s)
-DEST="$HOME/assistant-data/updates/$RUNTIME_VERSION"
+DEST="$USERS_ROOT/$U/updates/$RUNTIME_VERSION"
 
-# apiToken flows into extra.expoClient via `expo config` below — set -a so
-# plain KEY=value lines get exported to the expo child process, not just this shell
-set -a
-[ -f .DONOTCOMMIT/secrets.env ] && . ./.DONOTCOMMIT/secrets.env
-set +a
+# Retarget the shared checkout's userspace (gen-userspace scans it, metro
+# watches ../userspace). Sound ONLY under opsd's single global busy lock.
+ln -sfn "$USERS_ROOT/$U/userspace" userspace
+
+# Tokens are device-side now (pairing screen); nothing secret is baked into
+# bundles. Explicit empty keeps app.config's legacy extra.apiToken inert.
+export API_TOKEN=""
 
 pnpm install --frozen-lockfile
 node scripts/gen-userspace.mjs
@@ -25,7 +33,9 @@ fi
 if ls userspace/features/*/server.ts >/dev/null 2>&1; then
   pnpm --filter @assistant/server exec tsc --noEmit -p ../scripts/uscheck/server.json
 fi
-(cd app && npx expo export --platform android --output-dir "/tmp/ota-$TS")
+# --clear: same path serves DIFFERENT users' trees between runs — never trust
+# a bundler cache keyed on the swapped path
+(cd app && npx expo export --platform android --clear --output-dir "/tmp/ota-$TS")
 # OTA manifest serves this as extra.expoClient (Constants.expoConfig on device)
 (cd app && npx expo config --json --type public > "/tmp/ota-$TS/expoConfig.json")
 
@@ -35,4 +45,4 @@ mv "/tmp/ota-$TS" "$DEST/$TS"
 # retention: keep newest 5
 cd "$DEST" && ls | sort -r | tail -n +6 | xargs -I{} rm -rf {} || true
 
-echo "PUBLISHED update $RUNTIME_VERSION/$TS"
+echo "PUBLISHED $U update $RUNTIME_VERSION/$TS"
