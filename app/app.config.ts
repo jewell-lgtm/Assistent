@@ -1,9 +1,8 @@
 import type { ExpoConfig } from "expo/config"
 
-// Embedded at prebuild time into AndroidManifest (OTA request headers).
-// build-apk.sh sources .DONOTCOMMIT/secrets.env before running prebuild.
-const apiToken = process.env.API_TOKEN ?? ""
-
+// GENERIC build: nothing user-specific is baked. The pairing screen stores
+// {serverUrl, token} on device and repoints OTA via the native override
+// (src/pairing.ts) — one APK serves every user.
 const config: ExpoConfig = {
   name: "Assistant",
   slug: "local-assistent",
@@ -22,21 +21,23 @@ const config: ExpoConfig = {
       "POST_NOTIFICATIONS"
     ]
   },
-  // runtime-readable via expo-constants (embedded at prebuild/publish time)
-  extra: { apiToken },
+  scheme: "assistant",
   runtimeVersion: "1",
   updates: {
     enabled: true,
-    url: "https://assistant.wire.mattjewell.co.uk/ota/api/manifest",
+    // deliberately dead placeholder (RFC 2606): an unpaired install must never
+    // fetch anyone's bundle. fallbackToCacheTimeout 0 → launch never blocks on
+    // the failing check. Pairing installs the real URL+token via the native
+    // override, persisted in SharedPreferences across cold starts.
+    url: "https://unpaired.invalid/ota/api/manifest",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
     requestHeaders: {
-      authorization: `Bearer ${apiToken}`
+      // dead value, but the KEY must stay baked: the headers-only override
+      // variant validates against build-time-declared keys
+      authorization: "Bearer unpaired"
     },
-    // permits a future runtime Updates.setUpdateURLAndRequestHeadersOverride()
-    // to repoint an installed APK's OTA check (e.g. if the domain or token
-    // changes) without a reinstall. Not currently exercised — the baked url
-    // above is already correct — but kept so a URL/token change stays OTA-able.
+    // REQUIRED for Updates.setUpdateURLAndRequestHeadersOverride (pairing)
     disableAntiBrickingMeasures: true
   },
   plugins: [
@@ -44,6 +45,10 @@ const config: ExpoConfig = {
     "expo-background-task",
     "expo-sqlite",
     "expo-notifications",
+    // baked-but-unused: native modules are only purchasable at APK-build time —
+    // these let QR-scan pairing / secure token storage ship later as pure-JS OTA
+    "expo-camera",
+    "expo-secure-store",
     ["expo-build-properties", { android: { usesCleartextTraffic: true } }]
   ]
 }
