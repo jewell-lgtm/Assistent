@@ -2,9 +2,11 @@ import { NavigationContainer } from "@react-navigation/native"
 import { StatusBar } from "expo-status-bar"
 import * as Updates from "expo-updates"
 import { useEffect, useRef, useState } from "react"
-import { AppState, Text, View } from "react-native"
+import { AppState } from "react-native"
 import { SafeAreaProvider } from "react-native-safe-area-context"
-import { isPaired, loadPairing } from "./src/pairing"
+import { getPairing, isPaired, loadPairing } from "./src/pairing"
+import { PairingScreen } from "./src/PairingScreen"
+import { PairingUiContext } from "./src/PairingUi"
 import { RootTabs } from "./src/RootTabs"
 
 // Foreground sync: every time the app comes to the foreground, check for an
@@ -44,7 +46,8 @@ export default function App() {
   useForegroundOtaSync()
   // Pairing gate: nothing that fires a request (CodeScreen mounts eagerly)
   // renders until the stored pairing is loaded into the module cache.
-  const [phase, setPhase] = useState<"loading" | "unpaired" | "paired">("loading")
+  // "repair" = paired but user asked to change server; cancellable.
+  const [phase, setPhase] = useState<"loading" | "unpaired" | "paired" | "repair">("loading")
   useEffect(() => {
     loadPairing()
       .then((p) => setPhase(p === null ? "unpaired" : "paired"))
@@ -54,13 +57,17 @@ export default function App() {
   return (
     <SafeAreaProvider>
       {phase === "paired" ? (
-        <NavigationContainer>
-          <RootTabs />
-        </NavigationContainer>
+        <PairingUiContext.Provider value={{ repair: () => setPhase("repair") }}>
+          <NavigationContainer>
+            <RootTabs />
+          </NavigationContainer>
+        </PairingUiContext.Provider>
       ) : (
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 24 }}>
-          <Text>Not paired to a server.</Text>
-        </View>
+        <PairingScreen
+          initial={phase === "repair" ? getPairing() : null}
+          onPaired={() => setPhase("paired")}
+          {...(phase === "repair" ? { onCancel: () => setPhase("paired") } : {})}
+        />
       )}
       <StatusBar style="auto" />
     </SafeAreaProvider>

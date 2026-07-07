@@ -3,7 +3,8 @@ import type { StepName, StepStatus, Task, TaskResult } from "@assistant/platform
 import * as Updates from "expo-updates"
 import { useEffect, useRef, useState } from "react"
 import { Alert, AppState, ScrollView, StyleSheet, View } from "react-native"
-import { getBaseUrl, getToken } from "./pairing"
+import { getPairing, getBaseUrl, getToken } from "./pairing"
+import { usePairingUi } from "./PairingUi"
 import { connectSse, type SseFrame } from "./sse"
 import { decodeTaskFrame, fetchTask, fetchTasks, startTask } from "./tasks"
 
@@ -54,6 +55,7 @@ const STEP_LABEL: Record<StepName, string> = {
 }
 
 export const CodeScreen = () => {
+  const pairingUi = usePairingUi()
   const [prompt, setPrompt] = useState("")
   const [phase, setPhase] = useState<Phase>({ p: "idle" })
   const [transcript, setTranscript] = useState<ReadonlyArray<TranscriptLine>>([])
@@ -522,7 +524,7 @@ export const CodeScreen = () => {
         {phase.p === "unauthorized" && (
           <>
             <Spacer size={8} />
-            <Body>unauthorized — check the app's API token.</Body>
+            <Body>unauthorized — the server rejected this token. Use "Change server…" below to re-pair.</Body>
           </>
         )}
         {phase.p === "lost" && (
@@ -590,9 +592,15 @@ export const CodeScreen = () => {
         <Caption>
           bundle: {__DEV__ ? "dev" : `${Updates.updateId?.slice(0, 8) ?? "embedded"} · ${Updates.createdAt?.toISOString?.() ?? "APK build"}`}
         </Caption>
+        <Caption>
+          paired as {getPairing()?.user ?? "?"} · {(() => { try { return new URL(getBaseUrl()).host } catch { return getBaseUrl() } })()}
+        </Caption>
         <Spacer size={4} />
         <Button title={ota.busy ? "checking…" : "Refresh (check for update)"} variant="secondary" onPress={() => void onRefresh()} loading={ota.busy} disabled={busy} />
         {ota.status !== null && <Caption>{ota.status}</Caption>}
+
+        <Spacer size={8} />
+        <Button title="Change server…" variant="secondary" onPress={pairingUi.repair} disabled={busy} />
 
         <Spacer size={24} />
         <Button title={resetting ? "resetting…" : "Reset everything"} variant="danger" onPress={onReset} disabled={busy} loading={resetting} />
