@@ -1,0 +1,113 @@
+# Per-user stack: rendered by scripts/render-user-stack.sh (sed-substituted
+# placeholders: user, node port, image tag, users root). Same image for every
+# user; isolation is namespace + per-user hostPath quartet + per-user secret.
+# NOTE: core code is baked into the image at /app — the ONLY /repo mount is
+# the user's userspace (Dockerfile bridges /app/userspace -> /repo/userspace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: assistant-__USER__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant-server
+  namespace: assistant-__USER__
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: assistant-server
+  template:
+    metadata:
+      labels:
+        app: assistant-server
+    spec:
+      containers:
+        - name: server
+          image: assistant-server:__IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: USER_NAME
+              value: __USER__
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: assistant-secrets
+                  key: API_TOKEN
+            - name: OPSD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: assistant-secrets
+                  key: OPSD_TOKEN
+            - name: UPDATES_DIR
+              value: /data/updates
+            - name: REPO_DIR
+              value: /repo
+            - name: PI_CODING_AGENT_DIR
+              value: /pi-agent
+            - name: OLLAMA_BASE_URL
+              value: http://host.orb.internal:11434/v1
+            - name: APPSPACE_DB
+              value: /data/appspace/appspace.db
+            - name: USERSPACE_REMOTE
+              value: /data/appspace/userspace.git # bare repo on the appspace hostPath — survives userspace wipes
+          volumeMounts:
+            - name: updates
+              mountPath: /data/updates
+              readOnly: true
+            - name: appspace
+              mountPath: /data/appspace # rw: task rows + feature KV; litestream tails it host-side
+            - name: userspace
+              mountPath: /repo/userspace # rw: the user's userspace checkout (kubelet creates /repo)
+            - name: pi-agent
+              mountPath: /pi-agent # rw: oauth refresh writes back to auth.json (per-user BYO creds)
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: 256Mi }
+            limits: { memory: 1536Mi }
+      volumes:
+        - name: updates
+          hostPath:
+            path: __USERS_ROOT__/__USER__/updates
+            type: DirectoryOrCreate
+        - name: appspace
+          hostPath:
+            path: __USERS_ROOT__/__USER__/appspace
+            type: DirectoryOrCreate
+        - name: userspace
+          hostPath:
+            path: __USERS_ROOT__/__USER__/userspace
+            type: DirectoryOrCreate
+        - name: pi-agent
+          hostPath:
+            path: __USERS_ROOT__/__USER__/pi-agent
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assistant-server
+  namespace: assistant-__USER__
+spec:
+  type: NodePort
+  selector:
+    app: assistant-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: __NODE_PORT__
